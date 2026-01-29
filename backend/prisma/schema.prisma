@@ -1,0 +1,397 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  MENTOR
+  LEARNER
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum OAuthProvider {
+  GOOGLE
+  LINKEDIN
+}
+
+enum KycStatus {
+  NOT_SUBMITTED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum KycDocType {
+  PAN
+  AADHAAR
+}
+
+enum AvailabilityStatus {
+  AVAILABLE
+  RESERVED
+  BOOKED
+  BLOCKED
+}
+
+enum AvailabilityMode {
+  ONE_TIME
+  RECURRING
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELED
+  DISPUTED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+enum SubscriptionStatus {
+  CREATED
+  ACTIVE
+  PAUSED
+  CANCELED
+  PAST_DUE
+}
+
+enum PayoutStatus {
+  SCHEDULED
+  PROCESSING
+  PAID
+  FAILED
+  REVERSED
+}
+
+enum ReviewStatus {
+  PUBLISHED
+  HIDDEN
+}
+
+enum DisputeStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+model User {
+  id        String     @id @default(cuid())
+  email     String     @unique
+  phone     String?    @unique
+  name      String
+  role      Role
+  status    UserStatus @default(PENDING)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  mentorProfile      MentorProfile?
+  learnerProfile     LearnerProfile?
+  oauthAccounts      OAuthAccount[]
+  availabilityRules  AvailabilityRule[] @relation("MentorAvailabilityRules")
+  availabilitySlots  AvailabilitySlot[] @relation("MentorAvailabilitySlots")
+  mentorBookings     Booking[]          @relation("MentorBookings")
+  learnerBookings    Booking[]          @relation("LearnerBookings")
+  payouts            Payout[]
+  reviewsGiven       Review[]           @relation("ReviewsGiven")
+  reviewsReceived    Review[]           @relation("ReviewsReceived")
+  chatThreadsAsMentor ChatThread[]       @relation("ChatMentor")
+  chatThreadsAsLearner ChatThread[]      @relation("ChatLearner")
+  chatMessages       ChatMessage[]
+  kycDocuments       KycDocument[]
+  disputesRaised     Dispute[]          @relation("DisputesRaised")
+  mentorSubscriptions Subscription[]    @relation("MentorSubscriptions")
+  learnerSubscriptions Subscription[]   @relation("LearnerSubscriptions")
+}
+
+model MentorProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  headline        String?
+  linkedinHeadline String?
+  linkedinUrl     String?
+  linkedinLocation String?
+  linkedinIndustry String?
+  currentCompany  String?
+  currentTitle    String?
+  linkedinRaw     Json?
+  bio             String   @db.Text
+  yearsExperience Int
+  expertiseTags   String[]
+  subjectTags     String[]
+  collectionTags  String[]
+  languages       String[]
+  achievements    String?  @db.Text
+  introVideoUrl   String?
+  profilePhotoUrl String?
+  ratingAvg       Float    @default(0)
+  ratingCount     Int      @default(0)
+  timezone        String   @default("Asia/Kolkata")
+  maxSessionsPerDay  Int?
+  maxSessionsPerWeek Int?
+  approvedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model LearnerProfile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  goals     String?  @db.Text
+  timezone  String   @default("Asia/Kolkata")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model OAuthAccount {
+  id             String        @id @default(cuid())
+  userId         String
+  provider       OAuthProvider
+  providerUserId String
+  accessToken    String?       @db.Text
+  refreshToken   String?       @db.Text
+  scopes         String?
+  expiresAt      DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerUserId])
+}
+
+model KycDocument {
+  id             String     @id @default(cuid())
+  userId         String
+  type           KycDocType
+  status         KycStatus  @default(NOT_SUBMITTED)
+  docNumberLast4 String?
+  docUrl         String?
+  vendorRef      String?
+  submittedAt    DateTime?
+  verifiedAt     DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model AvailabilityRule {
+  id                  String   @id @default(cuid())
+  mentorId            String
+  weekday             Int
+  startTime           String
+  durationMinutes     Int
+  priceInr            Int
+  title               String
+  meetingLink         String?  @db.Text
+  mode                AvailabilityMode @default(ONE_TIME)
+  timezone            String   @default("Asia/Kolkata")
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  mentor User @relation("MentorAvailabilityRules", fields: [mentorId], references: [id])
+  slots  AvailabilitySlot[]
+  subscriptions Subscription[]
+}
+
+model AvailabilitySlot {
+  id                  String             @id @default(cuid())
+  mentorId            String
+  ruleId              String?
+  startAt             DateTime
+  endAt               DateTime
+  durationMinutes     Int
+  priceInr            Int
+  currency            String             @default("INR")
+  status              AvailabilityStatus @default(AVAILABLE)
+  title               String?
+  meetingLink         String?            @db.Text
+  mode                AvailabilityMode   @default(ONE_TIME)
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  mentor  User              @relation("MentorAvailabilitySlots", fields: [mentorId], references: [id])
+  rule    AvailabilityRule? @relation(fields: [ruleId], references: [id])
+  booking Booking?
+
+  @@index([mentorId, startAt])
+  @@unique([mentorId, startAt])
+}
+
+model Booking {
+  id                 String        @id @default(cuid())
+  mentorId           String
+  learnerId          String
+  availabilitySlotId String        @unique
+  status             BookingStatus @default(PENDING)
+  scheduledStartAt   DateTime
+  scheduledEndAt     DateTime
+  priceInr           Int
+  currency           String        @default("INR")
+  platformFeeInr     Int           @default(0)
+  commissionRate     Float         @default(0.15)
+  meetingLink        String?       @db.Text
+  meetingLinkAddedAt DateTime?
+  canceledAt         DateTime?
+  cancelReason       String?
+  refundAmountInr    Int?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  mentor           User            @relation("MentorBookings", fields: [mentorId], references: [id])
+  learner          User            @relation("LearnerBookings", fields: [learnerId], references: [id])
+  availabilitySlot AvailabilitySlot @relation(fields: [availabilitySlotId], references: [id])
+  payment          Payment?
+  payout           Payout?
+  reviews          Review[]
+  dispute          Dispute?
+  chatThread       ChatThread?
+  subscription     Subscription?
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  bookingId         String        @unique
+  provider          String
+  providerPaymentId String?
+  providerOrderId   String?
+  amountInr         Int
+  currency          String        @default("INR")
+  status            PaymentStatus @default(CREATED)
+  method            String?
+  capturedAt        DateTime?
+  scheduledFor      DateTime?
+  raw               Json?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+}
+
+model Subscription {
+  id                     String             @id @default(cuid())
+  mentorId               String
+  learnerId              String
+  availabilityRuleId     String
+  bookingId              String?            @unique
+  provider               String
+  providerPlanId         String?
+  providerSubscriptionId String?
+  status                 SubscriptionStatus @default(CREATED)
+  priceInr               Int
+  currency               String             @default("INR")
+  startAt                DateTime?
+  endAt                  DateTime?
+  nextChargeAt           DateTime?
+  canceledAt             DateTime?
+  pauseUntil             DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  mentor User @relation("MentorSubscriptions", fields: [mentorId], references: [id])
+  learner User @relation("LearnerSubscriptions", fields: [learnerId], references: [id])
+  availabilityRule AvailabilityRule @relation(fields: [availabilityRuleId], references: [id])
+  booking Booking? @relation(fields: [bookingId], references: [id])
+}
+
+model Payout {
+  id               String       @id @default(cuid())
+  bookingId        String       @unique
+  mentorId         String
+  provider         String
+  providerPayoutId String?
+  amountInr        Int
+  currency         String       @default("INR")
+  status           PayoutStatus @default(SCHEDULED)
+  scheduledFor     DateTime?
+  processedAt      DateTime?
+  failureReason    String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+  mentor  User    @relation(fields: [mentorId], references: [id])
+}
+
+model Review {
+  id         String       @id @default(cuid())
+  bookingId  String
+  reviewerId String
+  revieweeId String
+  rating     Int
+  comment    String?      @db.Text
+  status     ReviewStatus @default(PUBLISHED)
+  createdAt  DateTime     @default(now())
+
+  booking  Booking @relation(fields: [bookingId], references: [id])
+  reviewer User    @relation("ReviewsGiven", fields: [reviewerId], references: [id])
+  reviewee User    @relation("ReviewsReceived", fields: [revieweeId], references: [id])
+
+  @@unique([bookingId, reviewerId])
+}
+
+model Dispute {
+  id             String        @id @default(cuid())
+  bookingId      String        @unique
+  raisedById     String
+  reason         String        @db.Text
+  status         DisputeStatus @default(OPEN)
+  resolutionNote String?       @db.Text
+  createdAt      DateTime      @default(now())
+  resolvedAt     DateTime?
+
+  booking  Booking @relation(fields: [bookingId], references: [id])
+  raisedBy User    @relation("DisputesRaised", fields: [raisedById], references: [id])
+}
+
+model ChatThread {
+  id        String   @id @default(cuid())
+  mentorId  String
+  learnerId String
+  bookingId String?  @unique
+  createdAt DateTime @default(now())
+
+  mentor  User      @relation("ChatMentor", fields: [mentorId], references: [id])
+  learner User      @relation("ChatLearner", fields: [learnerId], references: [id])
+  booking Booking?  @relation(fields: [bookingId], references: [id])
+  messages ChatMessage[]
+
+  @@index([mentorId, learnerId])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  threadId  String
+  senderId  String
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+  readAt    DateTime?
+
+  thread ChatThread @relation(fields: [threadId], references: [id])
+  sender User       @relation(fields: [senderId], references: [id])
+
+  @@index([threadId, createdAt])
+}
