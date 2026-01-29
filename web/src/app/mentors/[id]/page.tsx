@@ -67,9 +67,8 @@ export default function MentorDetailPage() {
   const [rules, setRules] = useState<RecurringRule[]>([]);
   const [bookingLoading, setBookingLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selectedSlot, setSelectedSlot] = useState<
-    Mentor["availabilitySlots"][0] | null
-  >(null);
+  type Slot = NonNullable<Mentor["availabilitySlots"]>[number];
+  const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
   const [openRuleId, setOpenRuleId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -387,7 +386,7 @@ export default function MentorDetailPage() {
                             {day}
                           </div>
                           <div className="grid gap-2 p-3 sm:grid-cols-2">
-                            {daySlots.map((slot) => {
+                            {(daySlots ?? []).map((slot) => {
                               const isAvailable = slot.status === "AVAILABLE";
                               return (
                                 <button
