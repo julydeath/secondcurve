@@ -9,6 +9,24 @@ import { requireAuth, signSessionToken, verifySessionToken } from "../lib/auth";
 export const authRouter = Router();
 
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+const cookieDomain = process.env.COOKIE_DOMAIN || undefined;
+const cookieSameSite =
+  (process.env.COOKIE_SAMESITE as "lax" | "strict" | "none" | undefined) ??
+  "lax";
+const cookieSecure =
+  process.env.COOKIE_SECURE === "true" ||
+  process.env.NODE_ENV === "production";
+
+const setSessionCookie = (res: { cookie: Function }, token: string) => {
+  res.cookie("wb_session", token, {
+    httpOnly: true,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    path: "/",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    domain: cookieDomain,
+  });
+};
 const oauthStateSecret = process.env.OAUTH_STATE_SECRET ?? "dev-secret";
 const linkedInScopes =
   process.env.LINKEDIN_SCOPES ?? "openid profile email";
@@ -298,13 +316,7 @@ authRouter.post(
       email: user.email,
       name: user.name,
     });
-    res.cookie("wb_session", token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
 
     return res.status(201).json({
       user,
@@ -533,13 +545,7 @@ authRouter.get(
       email: user.email,
       name: user.name,
     });
-    res.cookie("wb_session", token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
 
     return res.redirect(`${appBaseUrl}/auth/success`);
   })
@@ -713,13 +719,7 @@ authRouter.get(
       email: user.email,
       name: user.name,
     });
-    res.cookie("wb_session", token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
 
     return res.redirect(`${appBaseUrl}/auth/success`);
   })
@@ -763,9 +763,10 @@ authRouter.post(
   asyncHandler(async (_req, res) => {
     res.clearCookie("wb_session", {
       httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      sameSite: cookieSameSite,
+      secure: cookieSecure,
       path: "/",
+      domain: cookieDomain,
     });
     return res.json({ ok: true });
   })

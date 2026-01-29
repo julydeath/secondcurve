@@ -22,6 +22,7 @@ export const createApp = () => {
     : undefined;
 
   app.use(helmet());
+  app.set("trust proxy", 1);
   app.use(cors({ origin: corsOrigins ?? true, credentials: true }));
   app.use(cookieParser());
 
