@@ -36,7 +36,7 @@ export const captureAuthorizedPayment = async (paymentId: string) => {
       data: {
         status: PaymentStatus.CAPTURED,
         capturedAt: new Date(),
-        raw: capture as Prisma.JsonObject,
+        raw: capture as unknown as Prisma.JsonObject,
       },
     });
 

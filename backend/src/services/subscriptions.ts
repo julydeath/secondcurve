@@ -65,6 +65,7 @@ export const resumeDueSubscriptions = async () => {
     where: {
       status: SubscriptionStatus.PAUSED,
       pauseUntil: { lte: now },
+      providerSubscriptionId: { not: null },
     },
     select: { id: true, providerSubscriptionId: true },
   });
@@ -75,6 +76,7 @@ export const resumeDueSubscriptions = async () => {
 
   const razorpay = razorpayClient();
   for (const sub of due) {
+    if (!sub.providerSubscriptionId) continue;
     try {
       await razorpay.subscriptions.resume(sub.providerSubscriptionId, {
         resume_at: "now",

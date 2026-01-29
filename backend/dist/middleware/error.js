@@ -4,6 +4,7 @@ exports.errorHandler = void 0;
 const zod_1 = require("zod");
 const http_1 = require("../lib/http");
 const errorHandler = (err, _req, res, _next) => {
+    console.error("[api_error]", err);
     if (err instanceof http_1.HttpError) {
         return res.status(err.status).json({
             error: err.message,

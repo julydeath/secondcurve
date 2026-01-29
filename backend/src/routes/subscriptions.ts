@@ -161,6 +161,9 @@ subscriptionRouter.post(
     ) {
       throw new HttpError(404, "subscription_not_found");
     }
+    if (!subscription.providerSubscriptionId) {
+      throw new HttpError(409, "subscription_not_ready");
+    }
 
     const razorpay = razorpayClient();
     await razorpay.subscriptions.pause(subscription.providerSubscriptionId, {
@@ -198,6 +201,9 @@ subscriptionRouter.post(
     ) {
       throw new HttpError(404, "subscription_not_found");
     }
+    if (!subscription.providerSubscriptionId) {
+      throw new HttpError(409, "subscription_not_ready");
+    }
 
     const razorpay = razorpayClient();
     await razorpay.subscriptions.resume(subscription.providerSubscriptionId, {
@@ -226,6 +232,9 @@ subscriptionRouter.post(
     });
     if (!subscription || subscription.learnerId !== req.user!.id) {
       throw new HttpError(404, "subscription_not_found");
+    }
+    if (!subscription.providerSubscriptionId) {
+      throw new HttpError(409, "subscription_not_ready");
     }
 
     const razorpay = razorpayClient();

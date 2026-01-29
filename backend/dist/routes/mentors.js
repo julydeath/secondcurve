@@ -129,14 +129,19 @@ exports.mentorRouter.get("/me", auth_1.requireAuth, (0, auth_1.requireRole)(clie
 }));
 exports.mentorRouter.get("/:id", (0, http_1.asyncHandler)(async (req, res) => {
     const mentorId = String(req.params.id);
+    const now = new Date();
+    const cutoff = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const mentor = await prisma_1.prisma.user.findUnique({
         where: { id: mentorId },
         include: {
             mentorProfile: true,
             availabilitySlots: {
-                where: { status: client_1.AvailabilityStatus.AVAILABLE, startAt: { gte: new Date() } },
+                where: {
+                    status: { in: [client_1.AvailabilityStatus.AVAILABLE, client_1.AvailabilityStatus.RESERVED, client_1.AvailabilityStatus.BOOKED] },
+                    startAt: { gte: cutoff },
+                },
                 orderBy: { startAt: "asc" },
-                take: 20,
+                take: 60,
             },
         },
     });
@@ -220,6 +225,22 @@ const availabilityRuleSchema = zod_1.z.object({
 exports.mentorRouter.post("/me/availability/rules", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.MENTOR), (0, http_1.asyncHandler)(async (req, res) => {
     await ensureLinkedIn(req.user.id);
     const input = availabilityRuleSchema.parse(req.body);
+    const startMinutes = toMinutes(input.startTime);
+    const endMinutes = startMinutes + input.durationMinutes;
+    const existingRules = await prisma_1.prisma.availabilityRule.findMany({
+        where: {
+            mentorId: req.user.id,
+            weekday: input.weekday,
+        },
+    });
+    const conflict = existingRules.some((rule) => {
+        const ruleStart = toMinutes(rule.startTime);
+        const ruleEnd = ruleStart + rule.durationMinutes;
+        return rangesOverlap(startMinutes, endMinutes, ruleStart, ruleEnd);
+    });
+    if (conflict) {
+        throw new http_1.HttpError(409, "availability_conflict");
+    }
     const rule = await prisma_1.prisma.availabilityRule.create({
         data: {
             mentorId: req.user.id,
@@ -246,15 +267,35 @@ exports.mentorRouter.get("/me/availability/rules", auth_1.requireAuth, (0, auth_
 exports.mentorRouter.patch("/me/availability/rules/:id", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.MENTOR), (0, http_1.asyncHandler)(async (req, res) => {
     const input = availabilityRuleSchema.partial().parse(req.body);
     const ruleId = String(req.params.id);
-    const updated = await prisma_1.prisma.availabilityRule.updateMany({
+    const existing = await prisma_1.prisma.availabilityRule.findFirst({
         where: { id: ruleId, mentorId: req.user.id },
-        data: input,
     });
-    if (!updated.count) {
+    if (!existing) {
         throw new http_1.HttpError(404, "rule_not_found");
     }
-    const rule = await prisma_1.prisma.availabilityRule.findUnique({
+    const nextWeekday = input.weekday ?? existing.weekday;
+    const nextStart = input.startTime ?? existing.startTime;
+    const nextDuration = input.durationMinutes ?? existing.durationMinutes;
+    const nextStartMinutes = toMinutes(nextStart);
+    const nextEndMinutes = nextStartMinutes + nextDuration;
+    const otherRules = await prisma_1.prisma.availabilityRule.findMany({
+        where: {
+            mentorId: req.user.id,
+            weekday: nextWeekday,
+            id: { not: ruleId },
+        },
+    });
+    const conflict = otherRules.some((rule) => {
+        const ruleStart = toMinutes(rule.startTime);
+        const ruleEnd = ruleStart + rule.durationMinutes;
+        return rangesOverlap(nextStartMinutes, nextEndMinutes, ruleStart, ruleEnd);
+    });
+    if (conflict) {
+        throw new http_1.HttpError(409, "availability_conflict");
+    }
+    const rule = await prisma_1.prisma.availabilityRule.update({
         where: { id: ruleId },
+        data: input,
     });
     return res.json({ rule });
 }));
@@ -276,6 +317,7 @@ const toMinutes = (time) => {
     const [hours, minutes] = time.split(":").map(Number);
     return hours * 60 + minutes;
 };
+const rangesOverlap = (aStart, aEnd, bStart, bEnd) => aStart < bEnd && bStart < aEnd;
 exports.mentorRouter.post("/me/availability/rules/:id/generate", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.MENTOR), (0, http_1.asyncHandler)(async (req, res) => {
     const input = ruleGenerateSchema.parse(req.body ?? {});
     const ruleId = String(req.params.id);
@@ -330,6 +372,24 @@ const slotSchema = zod_1.z.object({
 exports.mentorRouter.post("/me/availability/slots", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.MENTOR), (0, http_1.asyncHandler)(async (req, res) => {
     await ensureLinkedIn(req.user.id);
     const input = zod_1.z.array(slotSchema).min(1).parse(req.body);
+    const slotRanges = input.map((slot) => ({
+        startAt: new Date(slot.startAt),
+        endAt: new Date(slot.endAt),
+    }));
+    const minStart = new Date(Math.min(...slotRanges.map((slot) => slot.startAt.getTime())));
+    const maxEnd = new Date(Math.max(...slotRanges.map((slot) => slot.endAt.getTime())));
+    const existingSlots = await prisma_1.prisma.availabilitySlot.findMany({
+        where: {
+            mentorId: req.user.id,
+            startAt: { lt: maxEnd },
+            endAt: { gt: minStart },
+        },
+        select: { startAt: true, endAt: true },
+    });
+    const overlap = slotRanges.some((slot) => existingSlots.some((existing) => slot.startAt < existing.endAt && existing.startAt < slot.endAt));
+    if (overlap) {
+        throw new http_1.HttpError(409, "availability_conflict");
+    }
     const slots = await prisma_1.prisma.availabilitySlot.createMany({
         data: input.map((slot) => ({
             mentorId: req.user.id,
@@ -354,8 +414,30 @@ exports.mentorRouter.get("/me/availability/slots", auth_1.requireAuth, (0, auth_
             startAt: { gte: from, lte: to },
         },
         orderBy: { startAt: "asc" },
+        include: {
+            booking: {
+                include: {
+                    learner: { select: { id: true, name: true } },
+                    subscription: true,
+                },
+            },
+        },
     });
     return res.json({ slots });
+}));
+exports.mentorRouter.get("/me/payouts", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.MENTOR), (0, http_1.asyncHandler)(async (req, res) => {
+    const payouts = await prisma_1.prisma.payout.findMany({
+        where: { mentorId: req.user.id },
+        orderBy: { createdAt: "desc" },
+        include: {
+            booking: {
+                include: {
+                    learner: { select: { id: true, name: true, email: true } },
+                },
+            },
+        },
+    });
+    return res.json({ payouts });
 }));
 exports.mentorRouter.get("/:id/availability/slots", (0, http_1.asyncHandler)(async (req, res) => {
     const mentorId = String(req.params.id);
@@ -370,6 +452,29 @@ exports.mentorRouter.get("/:id/availability/slots", (0, http_1.asyncHandler)(asy
         orderBy: { startAt: "asc" },
     });
     return res.json({ slots });
+}));
+exports.mentorRouter.get("/:id/availability/rules", (0, http_1.asyncHandler)(async (req, res) => {
+    const mentorId = String(req.params.id);
+    const mode = req.query.mode ? String(req.query.mode).toUpperCase() : undefined;
+    const mentor = await prisma_1.prisma.user.findUnique({
+        where: { id: mentorId },
+        include: { mentorProfile: true },
+    });
+    if (!mentor ||
+        mentor.role !== client_1.Role.MENTOR ||
+        mentor.status !== client_1.UserStatus.ACTIVE ||
+        !mentor.mentorProfile?.approvedAt) {
+        throw new http_1.HttpError(404, "mentor_not_found");
+    }
+    const rules = await prisma_1.prisma.availabilityRule.findMany({
+        where: {
+            mentorId,
+            active: true,
+            ...(mode ? { mode: mode } : {}),
+        },
+        orderBy: { createdAt: "desc" },
+    });
+    return res.json({ rules });
 }));
 exports.mentorRouter.patch("/me/availability/slots/:id", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.MENTOR), (0, http_1.asyncHandler)(async (req, res) => {
     const input = zod_1.z

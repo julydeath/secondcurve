@@ -16,6 +16,8 @@ const learners_1 = require("./routes/learners");
 const bookings_1 = require("./routes/bookings");
 const admin_1 = require("./routes/admin");
 const reviews_1 = require("./routes/reviews");
+const webhooks_1 = require("./routes/webhooks");
+const subscriptions_1 = require("./routes/subscriptions");
 const error_1 = require("./middleware/error");
 const notFound_1 = require("./middleware/notFound");
 const createApp = () => {
@@ -26,6 +28,8 @@ const createApp = () => {
     app.use((0, helmet_1.default)());
     app.use((0, cors_1.default)({ origin: corsOrigins ?? true, credentials: true }));
     app.use((0, cookie_parser_1.default)());
+    app.use("/webhooks/razorpay", express_1.default.raw({ type: "application/json" }));
+    app.use("/webhooks", webhooks_1.webhookRouter);
     app.use(express_1.default.json({ limit: "1mb" }));
     app.use((0, morgan_1.default)("tiny"));
     app.use("/health", health_1.healthRouter);
@@ -33,6 +37,7 @@ const createApp = () => {
     app.use("/mentors", mentors_1.mentorRouter);
     app.use("/learners", learners_1.learnerRouter);
     app.use("/bookings", bookings_1.bookingRouter);
+    app.use("/subscriptions", subscriptions_1.subscriptionRouter);
     app.use("/reviews", reviews_1.reviewRouter);
     app.use("/admin", admin_1.adminRouter);
     app.use(notFound_1.notFoundHandler);

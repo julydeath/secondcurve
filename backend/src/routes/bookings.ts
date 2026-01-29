@@ -105,7 +105,7 @@ bookingRouter.post(
             status: PaymentStatus.CREATED,
             providerOrderId: order.id,
             scheduledFor,
-            raw: order as Prisma.JsonObject,
+          raw: order as unknown as Prisma.JsonObject,
           },
         });
 

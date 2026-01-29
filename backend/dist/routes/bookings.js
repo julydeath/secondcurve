@@ -7,126 +7,38 @@ const zod_1 = require("zod");
 const prisma_1 = require("../lib/prisma");
 const http_1 = require("../lib/http");
 const auth_1 = require("../lib/auth");
+const razorpay_1 = require("../lib/razorpay");
+const calendar_1 = require("../lib/calendar");
+const payments_1 = require("../services/payments");
 exports.bookingRouter = (0, express_1.Router)();
-const createCalendarEvent = async (params) => {
-    await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${params.accessToken}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            summary: params.summary,
-            description: params.description,
-            start: { dateTime: params.start, timeZone: params.timezone },
-            end: { dateTime: params.end, timeZone: params.timezone },
-        }),
-    });
-};
-const refreshGoogleToken = async (refreshToken) => {
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    if (!clientId || !clientSecret) {
-        throw new http_1.HttpError(500, "google_oauth_not_configured");
-    }
-    const response = await fetch("https://oauth2.googleapis.com/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-            client_id: clientId,
-            client_secret: clientSecret,
-            grant_type: "refresh_token",
-            refresh_token: refreshToken,
-        }),
-    });
-    if (!response.ok) {
-        throw new http_1.HttpError(502, "google_token_refresh_failed");
-    }
-    return (await response.json());
-};
-const getGoogleAccessTokenForUser = async (userId) => {
-    const account = await prisma_1.prisma.oAuthAccount.findFirst({
-        where: {
-            userId,
-            provider: client_1.OAuthProvider.GOOGLE,
-        },
-    });
-    if (!account || !account.accessToken) {
-        return null;
-    }
-    const needsRefresh = account.expiresAt &&
-        account.refreshToken &&
-        account.expiresAt.getTime() < Date.now() + 60_000;
-    if (!needsRefresh) {
-        return account.accessToken;
-    }
-    const refreshed = await refreshGoogleToken(account.refreshToken);
-    await prisma_1.prisma.oAuthAccount.update({
-        where: { id: account.id },
-        data: {
-            accessToken: refreshed.access_token,
-            scopes: refreshed.scope ?? account.scopes,
-            expiresAt: refreshed.expires_in
-                ? new Date(Date.now() + refreshed.expires_in * 1000)
-                : account.expiresAt,
-        },
-    });
-    return refreshed.access_token;
-};
-const syncCalendarForBooking = async (bookingId) => {
-    const booking = await prisma_1.prisma.booking.findUnique({
-        where: { id: bookingId },
-        include: {
-            mentor: { select: { id: true, name: true, email: true } },
-            learner: { select: { id: true, name: true, email: true } },
-        },
-    });
-    if (!booking) {
-        return;
-    }
-    const [mentorToken, learnerToken] = await Promise.all([
-        getGoogleAccessTokenForUser(booking.mentorId),
-        getGoogleAccessTokenForUser(booking.learnerId),
-    ]);
-    const timezone = "Asia/Kolkata";
-    const summary = `WisdomBridge • ${booking.mentor.name} ↔ ${booking.learner.name}`;
-    const description = `Session booked on WisdomBridge. Meeting link: ${booking.meetingLink ?? "Pending"}`;
-    const start = booking.scheduledStartAt.toISOString();
-    const end = booking.scheduledEndAt.toISOString();
-    const tasks = [];
-    if (mentorToken) {
-        tasks.push(createCalendarEvent({
-            accessToken: mentorToken,
-            summary,
-            description,
-            start,
-            end,
-            timezone,
-        }));
-    }
-    if (learnerToken) {
-        tasks.push(createCalendarEvent({
-            accessToken: learnerToken,
-            summary,
-            description,
-            start,
-            end,
-            timezone,
-        }));
-    }
-    await Promise.allSettled(tasks);
-};
 const bookingCreateSchema = zod_1.z.object({
     availabilitySlotId: zod_1.z.string().min(1),
 });
 exports.bookingRouter.post("/", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.LEARNER), (0, http_1.asyncHandler)(async (req, res) => {
     const input = bookingCreateSchema.parse(req.body);
+    console.log("Creating booking for slot:", input);
     const result = await prisma_1.prisma.$transaction(async (tx) => {
         const slot = await tx.availabilitySlot.findUnique({
             where: { id: input.availabilitySlotId },
         });
         if (!slot || slot.status !== client_1.AvailabilityStatus.AVAILABLE) {
             throw new http_1.HttpError(409, "slot_unavailable");
+        }
+        if (slot.mode === "RECURRING") {
+            throw new http_1.HttpError(409, "use_subscription_for_recurring");
+        }
+        const existing = await tx.booking.findUnique({
+            where: { availabilitySlotId: slot.id },
+            include: { payment: true },
+        });
+        if (existing) {
+            if (existing.status !== client_1.BookingStatus.CANCELED) {
+                throw new http_1.HttpError(409, "slot_unavailable");
+            }
+            if (existing.payment) {
+                await tx.payment.delete({ where: { id: existing.payment.id } });
+            }
+            await tx.booking.delete({ where: { id: existing.id } });
         }
         const booking = await tx.booking.create({
             data: {
@@ -145,12 +57,28 @@ exports.bookingRouter.post("/", auth_1.requireAuth, (0, auth_1.requireRole)(clie
             where: { id: slot.id },
             data: { status: client_1.AvailabilityStatus.RESERVED },
         });
+        const razorpay = (0, razorpay_1.razorpayClient)();
+        const order = await razorpay.orders.create({
+            amount: slot.priceInr * 100,
+            currency: "INR",
+            receipt: `booking_${booking.id}`,
+            payment_capture: false,
+            notes: {
+                bookingId: booking.id,
+                mentorId: slot.mentorId,
+                learnerId: req.user.id,
+            },
+        });
+        const scheduledFor = new Date(booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000);
         const payment = await tx.payment.create({
             data: {
                 bookingId: booking.id,
                 provider: "razorpay",
                 amountInr: slot.priceInr,
                 status: client_1.PaymentStatus.CREATED,
+                providerOrderId: order.id,
+                scheduledFor,
+                raw: order,
             },
         });
         await tx.chatThread.create({
@@ -160,11 +88,17 @@ exports.bookingRouter.post("/", auth_1.requireAuth, (0, auth_1.requireRole)(clie
                 bookingId: booking.id,
             },
         });
-        return { booking, payment };
+        return { booking, payment, order };
     });
     return res.status(201).json({
         booking: result.booking,
         payment: result.payment,
+        razorpay: {
+            keyId: (0, razorpay_1.getRazorpayKeyId)(),
+            orderId: result.order.id,
+            amount: result.order.amount,
+            currency: result.order.currency,
+        },
     });
 }));
 exports.bookingRouter.get("/me", auth_1.requireAuth, (0, http_1.asyncHandler)(async (req, res) => {
@@ -188,12 +122,54 @@ exports.bookingRouter.get("/me", auth_1.requireAuth, (0, http_1.asyncHandler)(as
             mentor: { select: { id: true, name: true, email: true } },
             learner: { select: { id: true, name: true, email: true } },
             payment: true,
+            availabilitySlot: {
+                include: {
+                    rule: true,
+                },
+            },
         },
     });
     return res.json({ bookings });
 }));
+exports.bookingRouter.get("/:id/receipt", auth_1.requireAuth, (0, http_1.asyncHandler)(async (req, res) => {
+    const bookingId = String(req.params.id);
+    const booking = await prisma_1.prisma.booking.findUnique({
+        where: { id: bookingId },
+        include: {
+            mentor: { select: { name: true, email: true } },
+            learner: { select: { name: true, email: true } },
+            payment: true,
+        },
+    });
+    if (!booking) {
+        throw new http_1.HttpError(404, "booking_not_found");
+    }
+    if (![booking.mentorId, booking.learnerId].includes(req.user.id)) {
+        throw new http_1.HttpError(403, "forbidden");
+    }
+    if (!booking.payment || booking.payment.status !== client_1.PaymentStatus.CAPTURED) {
+        throw new http_1.HttpError(409, "receipt_not_ready");
+    }
+    const lines = [
+        "WisdomBridge Payment Receipt",
+        `Booking ID: ${booking.id}`,
+        `Mentor: ${booking.mentor.name} (${booking.mentor.email})`,
+        `Learner: ${booking.learner.name} (${booking.learner.email})`,
+        `Session Time: ${booking.scheduledStartAt.toISOString()}`,
+        `Amount: INR ${booking.priceInr}`,
+        `Payment Status: ${booking.payment.status}`,
+        `Razorpay Order ID: ${booking.payment.providerOrderId ?? "N/A"}`,
+        `Razorpay Payment ID: ${booking.payment.providerPaymentId ?? "N/A"}`,
+        `Captured At: ${booking.payment.capturedAt?.toISOString() ?? "N/A"}`,
+    ];
+    res.setHeader("Content-Type", "text/plain");
+    res.setHeader("Content-Disposition", `attachment; filename="wisdombridge-receipt-${booking.id}.txt"`);
+    return res.send(lines.join("\n"));
+}));
 const paymentConfirmSchema = zod_1.z.object({
-    providerPaymentId: zod_1.z.string().min(1),
+    razorpayOrderId: zod_1.z.string().min(1),
+    razorpayPaymentId: zod_1.z.string().min(1),
+    razorpaySignature: zod_1.z.string().min(1),
     method: zod_1.z.string().optional(),
 });
 exports.bookingRouter.post("/:id/confirm-payment", auth_1.requireAuth, (0, auth_1.requireRole)(client_1.Role.LEARNER), (0, http_1.asyncHandler)(async (req, res) => {
@@ -212,28 +188,29 @@ exports.bookingRouter.post("/:id/confirm-payment", auth_1.requireAuth, (0, auth_
     if (!booking.payment) {
         throw new http_1.HttpError(409, "payment_missing");
     }
-    const updated = await prisma_1.prisma.$transaction(async (tx) => {
-        const payment = await tx.payment.update({
-            where: { id: booking.payment.id },
-            data: {
-                status: client_1.PaymentStatus.CAPTURED,
-                providerPaymentId: input.providerPaymentId,
-                method: input.method,
-                capturedAt: new Date(),
-            },
-        });
-        const updatedBooking = await tx.booking.update({
-            where: { id: booking.id },
-            data: { status: client_1.BookingStatus.CONFIRMED },
-        });
-        await tx.availabilitySlot.update({
-            where: { id: booking.availabilitySlotId },
-            data: { status: client_1.AvailabilityStatus.BOOKED },
-        });
-        return { booking: updatedBooking, payment };
+    if (booking.payment.providerOrderId !== input.razorpayOrderId) {
+        throw new http_1.HttpError(409, "order_mismatch");
+    }
+    const valid = (0, razorpay_1.verifyCheckoutSignature)(input.razorpayOrderId, input.razorpayPaymentId, input.razorpaySignature);
+    if (!valid) {
+        throw new http_1.HttpError(400, "invalid_signature");
+    }
+    const scheduledFor = booking.payment.scheduledFor ??
+        new Date(booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000);
+    const payment = await prisma_1.prisma.payment.update({
+        where: { id: booking.payment.id },
+        data: {
+            status: client_1.PaymentStatus.AUTHORIZED,
+            providerPaymentId: input.razorpayPaymentId,
+            method: input.method,
+            scheduledFor,
+        },
     });
-    await syncCalendarForBooking(booking.id);
-    return res.json(updated);
+    await (0, calendar_1.syncCalendarForBooking)(booking.id);
+    if (scheduledFor.getTime() <= Date.now()) {
+        await (0, payments_1.captureAuthorizedPayment)(payment.id);
+    }
+    return res.json({ payment });
 }));
 const cancelSchema = zod_1.z.object({
     reason: zod_1.z.string().min(3).max(500).optional(),
@@ -243,6 +220,7 @@ exports.bookingRouter.post("/:id/cancel", auth_1.requireAuth, (0, http_1.asyncHa
     const bookingId = String(req.params.id);
     const booking = await prisma_1.prisma.booking.findUnique({
         where: { id: bookingId },
+        include: { payment: true },
     });
     if (!booking) {
         throw new http_1.HttpError(404, "booking_not_found");
@@ -252,6 +230,10 @@ exports.bookingRouter.post("/:id/cancel", auth_1.requireAuth, (0, http_1.asyncHa
     }
     if (booking.status === client_1.BookingStatus.CANCELED) {
         throw new http_1.HttpError(409, "already_canceled");
+    }
+    const cutoff = new Date(booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000);
+    if (Date.now() >= cutoff.getTime()) {
+        throw new http_1.HttpError(409, "cancel_window_passed");
     }
     const updated = await prisma_1.prisma.$transaction(async (tx) => {
         const updatedBooking = await tx.booking.update({
@@ -266,6 +248,12 @@ exports.bookingRouter.post("/:id/cancel", auth_1.requireAuth, (0, http_1.asyncHa
             where: { id: booking.availabilitySlotId },
             data: { status: client_1.AvailabilityStatus.AVAILABLE },
         });
+        if (booking.payment) {
+            await tx.payment.update({
+                where: { id: booking.payment.id },
+                data: { status: client_1.PaymentStatus.FAILED },
+            });
+        }
         return updatedBooking;
     });
     return res.json({ booking: updated });
@@ -368,6 +356,6 @@ exports.bookingRouter.post("/:id/sync-calendar", auth_1.requireAuth, (0, http_1.
     if (![booking.mentorId, booking.learnerId].includes(req.user.id)) {
         throw new http_1.HttpError(403, "forbidden");
     }
-    await syncCalendarForBooking(bookingId);
+    await (0, calendar_1.syncCalendarForBooking)(bookingId);
     return res.json({ synced: true });
 }));

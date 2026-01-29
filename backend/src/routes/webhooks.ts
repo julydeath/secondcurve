@@ -167,6 +167,7 @@ webhookRouter.post(
           }
 
           if (event.event === "subscription.charged" && subscription.booking) {
+            const booking = subscription.booking;
             const chargedPayment = event.payload?.payment?.entity;
             if (chargedPayment?.id) {
               const existingPayment = await prisma.payment.findFirst({
@@ -189,11 +190,11 @@ webhookRouter.post(
             }
             await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
               await tx.booking.update({
-                where: { id: subscription.booking.id },
+                where: { id: booking.id },
                 data: { status: BookingStatus.CONFIRMED },
               });
               await tx.availabilitySlot.update({
-                where: { id: subscription.booking.availabilitySlotId },
+                where: { id: booking.availabilitySlotId },
                 data: { status: AvailabilityStatus.BOOKED },
               });
             });
@@ -201,9 +202,9 @@ webhookRouter.post(
             if (subscription.availabilityRule) {
               const nextSlot = await findOrCreateNextSlot(
                 subscription.availabilityRule,
-                subscription.booking.scheduledStartAt,
+                booking.scheduledStartAt,
               );
-              const booking = await prisma.booking.create({
+              const nextBooking = await prisma.booking.create({
                 data: {
                   mentorId: subscription.mentorId,
                   learnerId: subscription.learnerId,
@@ -222,9 +223,9 @@ webhookRouter.post(
               });
               await prisma.subscription.update({
                 where: { id: subscription.id },
-                data: { bookingId: booking.id },
+                data: { bookingId: nextBooking.id },
               });
-              await syncCalendarForBooking(booking.id);
+              await syncCalendarForBooking(nextBooking.id);
             }
           }
         }
