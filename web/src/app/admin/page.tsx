@@ -1,12 +1,10 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import RoleGate from "@/components/RoleGate";
 import InkButton from "@/components/InkButton";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { fetchJson } from "@/lib/api";
 
 type Mentor = {
   id: string;
@@ -28,49 +26,28 @@ const disputes = [
 ];
 
 export default function AdminPanel() {
-  const [pendingMentors, setPendingMentors] = useState<Mentor[]>([]);
-  const [approvedMentors, setApprovedMentors] = useState<Mentor[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
-  const load = async () => {
-    setLoading(true);
-    setError(null);
-    const [pendingRes, approvedRes] = await Promise.all([
-      fetch(`${apiUrl}/admin/mentors?status=pending`, {
-        credentials: "include",
-      }),
-      fetch(`${apiUrl}/admin/mentors?status=approved`, {
-        credentials: "include",
-      }),
-    ]);
-    if (!pendingRes.ok || !approvedRes.ok) {
-      setError("Not authorized or no data available.");
-      setLoading(false);
-      return;
-    }
-    if (pendingRes.ok) {
-      const data = (await pendingRes.json()) as { mentors: Mentor[] };
-      setPendingMentors(data.mentors);
-    }
-    if (approvedRes.ok) {
-      const data = (await approvedRes.json()) as { mentors: Mentor[] };
-      setApprovedMentors(data.mentors);
-    }
-    setLoading(false);
-  };
+  const pendingQuery = useQuery({
+    queryKey: ["admin", "mentors", "pending"],
+    queryFn: () => fetchJson<{ mentors: Mentor[] }>("/admin/mentors?status=pending"),
+  });
 
-  useEffect(() => {
-    load();
-  }, []);
+  const approvedQuery = useQuery({
+    queryKey: ["admin", "mentors", "approved"],
+    queryFn: () => fetchJson<{ mentors: Mentor[] }>("/admin/mentors?status=approved"),
+  });
 
-  const approve = async (mentorId: string) => {
-    await fetch(`${apiUrl}/admin/mentors/${mentorId}/approve`, {
-      method: "POST",
-      credentials: "include",
-    });
-    await load();
-  };
+  const approveMutation = useMutation({
+    mutationFn: (mentorId: string) =>
+      fetchJson(`/admin/mentors/${mentorId}/approve`, { method: "POST" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["admin", "mentors"] });
+    },
+  });
+
+  const pendingMentors = pendingQuery.data?.mentors ?? [];
+  const approvedMentors = approvedQuery.data?.mentors ?? [];
 
   return (
     <RoleGate allowed={["ADMIN"]}>
@@ -89,9 +66,9 @@ export default function AdminPanel() {
           <section className="grid gap-6 md:grid-cols-2">
             <div className="ink-border p-6">
               <h2 className="newsprint-title text-sm">Pending Approvals</h2>
-              {error && (
+              {(pendingQuery.isError || approvedQuery.isError) && (
                 <p className="mt-3 text-xs uppercase tracking-widest text-red-700">
-                  {error}
+                  Not authorized or no data available.
                 </p>
               )}
               <div className="mt-4 space-y-4">
@@ -130,7 +107,7 @@ export default function AdminPanel() {
                           </span>
                         ))}
                     </div>
-                    <InkButton onClick={() => approve(item.id)}>
+                    <InkButton onClick={() => approveMutation.mutate(item.id)}>
                       Approve
                     </InkButton>
                   </div>
@@ -162,7 +139,7 @@ export default function AdminPanel() {
           <section className="ink-border p-6">
             <div className="flex items-center justify-between">
               <h2 className="newsprint-title text-sm">Approved Mentors</h2>
-              {loading && (
+              {approvedQuery.isLoading && (
                 <span className="text-xs text-[var(--ink-700)]">Loading...</span>
               )}
             </div>
@@ -173,10 +150,7 @@ export default function AdminPanel() {
                 </p>
               )}
               {approvedMentors.map((mentor) => (
-                <div
-                  key={mentor.id}
-                  className="border-2 border-black p-3"
-                >
+                <div key={mentor.id} className="border-2 border-black p-3">
                   <p className="text-base font-semibold">{mentor.name}</p>
                   <p className="text-xs text-[var(--ink-700)]">
                     {mentor.mentorProfile?.headline ?? "Mentor"}

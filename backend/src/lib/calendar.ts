@@ -10,19 +10,34 @@ const createCalendarEvent = async (params: {
   end: string;
   timezone: string;
 }) => {
-  await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.accessToken}`,
-      "Content-Type": "application/json",
+  const response = await fetch(
+    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${params.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        summary: params.summary,
+        description: params.description,
+        start: { dateTime: params.start, timeZone: params.timezone },
+        end: { dateTime: params.end, timeZone: params.timezone },
+      }),
     },
-    body: JSON.stringify({
-      summary: params.summary,
-      description: params.description,
-      start: { dateTime: params.start, timeZone: params.timezone },
-      end: { dateTime: params.end, timeZone: params.timezone },
-    }),
-  });
+  );
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new HttpError(502, "google_calendar_event_failed", { body: text });
+  }
+  return response;
+};
+
+const hasCalendarScope = (scopes?: string | null) => {
+  if (!scopes) return false;
+  return scopes.split(" ").some((scope) =>
+    scope.includes("https://www.googleapis.com/auth/calendar.events"),
+  );
 };
 
 const refreshGoogleToken = async (refreshToken: string) => {
@@ -54,7 +69,10 @@ const refreshGoogleToken = async (refreshToken: string) => {
   };
 };
 
-const getGoogleAccessTokenForUser = async (userId: string) => {
+const getGoogleAccessTokenForUser = async (
+  userId: string,
+  options?: { requireCalendarScope?: boolean },
+) => {
   const account = await prisma.oAuthAccount.findFirst({
     where: {
       userId,
@@ -62,6 +80,10 @@ const getGoogleAccessTokenForUser = async (userId: string) => {
     },
   });
   if (!account || !account.accessToken) {
+    return null;
+  }
+
+  if (options?.requireCalendarScope && !hasCalendarScope(account.scopes)) {
     return null;
   }
 
@@ -74,7 +96,11 @@ const getGoogleAccessTokenForUser = async (userId: string) => {
     return account.accessToken;
   }
 
-  const refreshed = await refreshGoogleToken(account.refreshToken!);
+  if (!account.refreshToken) {
+    return null;
+  }
+
+  const refreshed = await refreshGoogleToken(account.refreshToken);
   await prisma.oAuthAccount.update({
     where: { id: account.id },
     data: {
@@ -98,12 +124,16 @@ export const syncCalendarForBooking = async (bookingId: string) => {
     },
   });
   if (!booking) {
-    return;
+    return { mentorAdded: false, learnerAdded: false };
   }
 
   const [mentorToken, learnerToken] = await Promise.all([
-    getGoogleAccessTokenForUser(booking.mentorId),
-    getGoogleAccessTokenForUser(booking.learnerId),
+    getGoogleAccessTokenForUser(booking.mentorId, {
+      requireCalendarScope: true,
+    }),
+    getGoogleAccessTokenForUser(booking.learnerId, {
+      requireCalendarScope: true,
+    }),
   ]);
 
   const timezone = "Asia/Kolkata";
@@ -115,7 +145,10 @@ export const syncCalendarForBooking = async (bookingId: string) => {
   const start = booking.scheduledStartAt.toISOString();
   const end = booking.scheduledEndAt.toISOString();
 
-  const tasks = [];
+  const tasks: Promise<void>[] = [];
+  let mentorAdded = false;
+  let learnerAdded = false;
+
   if (mentorToken) {
     tasks.push(
       createCalendarEvent({
@@ -125,7 +158,9 @@ export const syncCalendarForBooking = async (bookingId: string) => {
         start,
         end,
         timezone,
-      })
+      }).then(() => {
+        mentorAdded = true;
+      }),
     );
   }
   if (learnerToken) {
@@ -137,9 +172,13 @@ export const syncCalendarForBooking = async (bookingId: string) => {
         start,
         end,
         timezone,
-      })
+      }).then(() => {
+        learnerAdded = true;
+      }),
     );
   }
 
   await Promise.allSettled(tasks);
+
+  return { mentorAdded, learnerAdded };
 };

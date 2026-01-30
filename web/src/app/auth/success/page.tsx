@@ -2,36 +2,35 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { useQuery } from "@tanstack/react-query";
+import { fetchJson } from "@/lib/api";
 
 export default function AuthSuccess() {
   const router = useRouter();
 
+  const meQuery = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () =>
+      fetchJson<{ user: { role: "MENTOR" | "LEARNER" | "ADMIN" } }>("/auth/me"),
+    retry: false,
+  });
+
   useEffect(() => {
-    const fetchMe = async () => {
-      const response = await fetch(`${apiUrl}/auth/me`, {
-        credentials: "include",
-      });
-      if (!response.ok) {
-        router.replace("/auth/sign-in");
-        return;
-      }
-      const data = (await response.json()) as {
-        user: { role: "MENTOR" | "LEARNER" | "ADMIN" };
-      };
-      if (data.user.role === "MENTOR") {
+    if (meQuery.isLoading) return;
+    if (meQuery.isError) {
+      router.replace("/auth/sign-in");
+      return;
+    }
+    if (meQuery.data) {
+      if (meQuery.data.user.role === "MENTOR") {
         router.replace("/mentor");
-      } else if (data.user.role === "ADMIN") {
+      } else if (meQuery.data.user.role === "ADMIN") {
         router.replace("/admin");
       } else {
         router.replace("/learner");
       }
-    };
-
-    fetchMe();
-  }, [router]);
+    }
+  }, [meQuery.data, meQuery.isError, meQuery.isLoading, router]);
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-12">

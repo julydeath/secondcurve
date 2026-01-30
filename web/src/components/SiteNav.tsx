@@ -3,8 +3,8 @@
 import Link from "next/link";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
-
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { fetchJson } from "@/lib/api";
 
 type SessionState = {
   status: "loading" | "authenticated" | "anonymous";
@@ -23,38 +23,47 @@ export default function SiteNav() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    const checkSession = async () => {
-      try {
-        const response = await fetch(`${apiUrl}/auth/me`, {
-          credentials: "include",
-        });
-        if (response.ok) {
-          const data = (await response.json()) as {
-            user: {
-              name: string;
-              role: "MENTOR" | "LEARNER" | "ADMIN";
-              email?: string;
-              mentorProfile?: { profilePhotoUrl?: string | null } | null;
-            };
-          };
-          setSession({
-            status: "authenticated",
-            name: data.user.name,
-            role: data.user.role,
-            email: data.user.email,
-            profilePhotoUrl: data.user.mentorProfile?.profilePhotoUrl ?? null,
-          });
-          return;
-        }
-      } catch {
-        // ignore
-      }
-      setSession({ status: "anonymous" });
-    };
+  const queryClient = useQueryClient();
+  const sessionQuery = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () =>
+      fetchJson<{
+        user: {
+          name: string;
+          role: "MENTOR" | "LEARNER" | "ADMIN";
+          email?: string;
+          mentorProfile?: { profilePhotoUrl?: string | null } | null;
+        };
+      }>("/auth/me"),
+    retry: false,
+  });
 
-    checkSession();
-  }, []);
+  useEffect(() => {
+    if (sessionQuery.isLoading) return;
+    if (sessionQuery.isError) {
+      setSession({ status: "anonymous" });
+      return;
+    }
+    if (sessionQuery.data) {
+      setSession({
+        status: "authenticated",
+        name: sessionQuery.data.user.name,
+        role: sessionQuery.data.user.role,
+        email: sessionQuery.data.user.email,
+        profilePhotoUrl:
+          sessionQuery.data.user.mentorProfile?.profilePhotoUrl ?? null,
+      });
+    }
+  }, [sessionQuery.data, sessionQuery.isError, sessionQuery.isLoading]);
+
+  const logoutMutation = useMutation({
+    mutationFn: () => fetchJson("/auth/logout", { method: "POST" }),
+    onSuccess: () => {
+      setSession({ status: "anonymous" });
+      queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
+      window.location.href = "/";
+    },
+  });
 
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -150,14 +159,7 @@ export default function SiteNav() {
                     </Link>
                     <button
                       className="dropdown-item"
-                      onClick={async () => {
-                        await fetch(`${apiUrl}/auth/logout`, {
-                          method: "POST",
-                          credentials: "include",
-                        });
-                        setSession({ status: "anonymous" });
-                        window.location.href = "/";
-                      }}
+                      onClick={() => logoutMutation.mutate()}
                     >
                       Logout
                     </button>
@@ -220,14 +222,9 @@ export default function SiteNav() {
                 </Link>
                 <button
                   className="ink-border w-full px-3 py-2 text-xs uppercase tracking-widest"
-                  onClick={async () => {
-                    await fetch(`${apiUrl}/auth/logout`, {
-                      method: "POST",
-                      credentials: "include",
-                    });
-                    setSession({ status: "anonymous" });
+                  onClick={() => {
                     setMobileOpen(false);
-                    window.location.href = "/";
+                    logoutMutation.mutate();
                   }}
                 >
                   Logout

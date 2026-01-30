@@ -8,6 +8,7 @@ import "./globals.css";
 import SiteNav from "@/components/SiteNav";
 import SiteFooter from "@/components/SiteFooter";
 import ToastProvider from "@/components/ToastProvider";
+import QueryProvider from "@/components/QueryProvider";
 
 const manrope = Manrope({
   variable: "--font-modern",
@@ -39,13 +40,15 @@ export default function RootLayout({
       <body
         className={`${manrope.variable} ${newsreader.variable} ${sourceSerif.variable} antialiased`}
       >
-        <ToastProvider>
-          <div className="min-h-screen bg-[var(--paper-100)] text-[var(--ink-900)]">
-            <SiteNav />
-            <div className="min-h-[calc(100vh-136px)]">{children}</div>
-            <SiteFooter />
-          </div>
-        </ToastProvider>
+        <QueryProvider>
+          <ToastProvider>
+            <div className="min-h-screen bg-[var(--paper-100)] text-[var(--ink-900)]">
+              <SiteNav />
+              <div className="min-h-[calc(100vh-136px)]">{children}</div>
+              <SiteFooter />
+            </div>
+          </ToastProvider>
+        </QueryProvider>
       </body>
     </html>
   );

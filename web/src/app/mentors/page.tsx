@@ -1,12 +1,11 @@
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import InkButton from "@/components/InkButton";
 import { useToast } from "@/components/ToastProvider";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { apiUrl, fetchJson } from "@/lib/api";
 
 type Mentor = {
   id: string;
@@ -24,8 +23,6 @@ type Mentor = {
 
 export default function MentorsPage() {
   const { pushToast } = useToast();
-  const [mentors, setMentors] = useState<Mentor[]>([]);
-  const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({
     expertise: "",
     subject: "",
@@ -36,33 +33,29 @@ export default function MentorsPage() {
     minExperience: "",
     minRating: "",
   });
+  const [appliedFilters, setAppliedFilters] = useState(filters);
 
-  const load = async () => {
-    setLoading(true);
-    const params = new URLSearchParams();
-    if (filters.expertise) params.set("expertise", filters.expertise);
-    if (filters.subject) params.set("subject", filters.subject);
-    if (filters.collection) params.set("collection", filters.collection);
-    if (filters.minPrice) params.set("minPrice", filters.minPrice);
-    if (filters.maxPrice) params.set("maxPrice", filters.maxPrice);
-    if (filters.language) params.set("language", filters.language);
-    if (filters.minExperience)
-      params.set("minExperience", filters.minExperience);
-    if (filters.minRating) params.set("minRating", filters.minRating);
+  const queryKey = useMemo(() => ["mentors", appliedFilters], [appliedFilters]);
 
-    const response = await fetch(`${apiUrl}/mentors?${params.toString()}`);
-    if (response.ok) {
-      const data = (await response.json()) as { mentors: Mentor[] };
-      setMentors(data.mentors);
-    } else {
-      pushToast("Unable to load mentors", "error");
-    }
-    setLoading(false);
-  };
+  const mentorsQuery = useQuery({
+    queryKey,
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (appliedFilters.expertise) params.set("expertise", appliedFilters.expertise);
+      if (appliedFilters.subject) params.set("subject", appliedFilters.subject);
+      if (appliedFilters.collection) params.set("collection", appliedFilters.collection);
+      if (appliedFilters.minPrice) params.set("minPrice", appliedFilters.minPrice);
+      if (appliedFilters.maxPrice) params.set("maxPrice", appliedFilters.maxPrice);
+      if (appliedFilters.language) params.set("language", appliedFilters.language);
+      if (appliedFilters.minExperience)
+        params.set("minExperience", appliedFilters.minExperience);
+      if (appliedFilters.minRating) params.set("minRating", appliedFilters.minRating);
 
-  useEffect(() => {
-    load();
-  }, []);
+      return fetchJson<{ mentors: Mentor[] }>(`/mentors?${params.toString()}`);
+    },
+  });
+
+  const mentors = mentorsQuery.data?.mentors ?? [];
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-12 space-y-8">
@@ -104,10 +97,7 @@ export default function MentorsPage() {
               className="ink-border px-3 py-2 text-sm"
               value={filters.collection}
               onChange={(event) =>
-                setFilters((prev) => ({
-                  ...prev,
-                  collection: event.target.value,
-                }))
+                setFilters((prev) => ({ ...prev, collection: event.target.value }))
               }
             />
           </label>
@@ -147,10 +137,7 @@ export default function MentorsPage() {
               className="ink-border px-3 py-2 text-sm"
               value={filters.minExperience}
               onChange={(event) =>
-                setFilters((prev) => ({
-                  ...prev,
-                  minExperience: event.target.value,
-                }))
+                setFilters((prev) => ({ ...prev, minExperience: event.target.value }))
               }
             />
           </label>
@@ -160,18 +147,15 @@ export default function MentorsPage() {
               className="ink-border px-3 py-2 text-sm"
               value={filters.minRating}
               onChange={(event) =>
-                setFilters((prev) => ({
-                  ...prev,
-                  minRating: event.target.value,
-                }))
+                setFilters((prev) => ({ ...prev, minRating: event.target.value }))
               }
             />
           </label>
         </div>
         <InkButton
           className="mt-6"
-          onClick={async () => {
-            await load();
+          onClick={() => {
+            setAppliedFilters(filters);
             pushToast("Filters applied", "success");
           }}
         >
@@ -180,7 +164,7 @@ export default function MentorsPage() {
       </section>
 
       <section className="grid gap-5 md:grid-cols-2">
-        {loading &&
+        {mentorsQuery.isLoading &&
           Array.from({ length: 4 }).map((_, index) => (
             <div key={`skeleton-${index}`} className="ink-border p-6 space-y-4">
               <div className="skeleton skeleton-line w-2/3" />
@@ -193,7 +177,12 @@ export default function MentorsPage() {
               <div className="skeleton skeleton-line w-24" />
             </div>
           ))}
-        {!loading &&
+        {!mentorsQuery.isLoading && mentors.length === 0 && (
+          <div className="ink-border p-6 text-sm text-[var(--ink-700)]">
+            No mentors found.
+          </div>
+        )}
+        {!mentorsQuery.isLoading &&
           mentors.map((mentor) => (
             <div key={mentor.id} className="ink-border p-6">
               <div className="flex items-start justify-between gap-4">

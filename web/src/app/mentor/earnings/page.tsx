@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { useMemo } from "react";
+import { ColumnDef } from "@tanstack/react-table";
+import { useQuery } from "@tanstack/react-query";
+import DataTable from "@/components/DataTable";
+import { fetchJson } from "@/lib/api";
 
 type Payout = {
   id: string;
@@ -15,23 +16,12 @@ type Payout = {
 };
 
 export default function MentorEarnings() {
-  const [payouts, setPayouts] = useState<Payout[]>([]);
-  const [loading, setLoading] = useState(true);
+  const payoutsQuery = useQuery({
+    queryKey: ["mentors", "payouts"],
+    queryFn: () => fetchJson<{ payouts: Payout[] }>("/mentors/me/payouts"),
+  });
 
-  useEffect(() => {
-    const load = async () => {
-      const response = await fetch(`${apiUrl}/mentors/me/payouts`, {
-        credentials: "include",
-      });
-      if (response.ok) {
-        const data = (await response.json()) as { payouts: Payout[] };
-        setPayouts(data.payouts);
-      }
-      setLoading(false);
-    };
-    load();
-  }, []);
-
+  const payouts = payoutsQuery.data?.payouts ?? [];
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const monthTotal = payouts
@@ -57,6 +47,31 @@ export default function MentorEarnings() {
         : new Date(b.createdAt).getTime();
       return aTime - bTime;
     })[0];
+
+  const columns = useMemo<ColumnDef<Payout>[]>(
+    () => [
+      {
+        header: "Created",
+        cell: ({ row }) => new Date(row.original.createdAt).toLocaleDateString(),
+      },
+      {
+        header: "Scheduled",
+        cell: ({ row }) =>
+          row.original.scheduledFor
+            ? new Date(row.original.scheduledFor).toLocaleDateString()
+            : "—",
+      },
+      {
+        header: "Amount",
+        cell: ({ row }) => `₹${row.original.amountInr}`,
+      },
+      {
+        header: "Status",
+        accessorKey: "status",
+      },
+    ],
+    [],
+  );
 
   return (
     <div className="space-y-6">
@@ -86,45 +101,13 @@ export default function MentorEarnings() {
         </div>
       </div>
 
-      <div className="ink-border divide-y-2 divide-black">
-        {loading && (
-          <div className="p-6 space-y-3">
-            {Array.from({ length: 3 }).map((_, index) => (
-              <div key={`payout-skel-${index}`} className="space-y-2">
-                <div className="skeleton skeleton-line w-1/3" />
-                <div className="skeleton skeleton-line w-1/2" />
-              </div>
-            ))}
-          </div>
-        )}
-        {!loading && payouts.length === 0 && (
-          <div className="px-5 py-4 text-sm text-[var(--ink-700)]">
-            No payouts yet.
-          </div>
-        )}
-        {payouts.map((payout) => (
-          <div
-            key={payout.id}
-            className="flex flex-col gap-2 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
-          >
-            <div>
-              <p className="text-base font-semibold">
-                {new Date(payout.createdAt).toLocaleDateString()}
-              </p>
-              <p className="text-sm text-[var(--ink-700)]">
-                Scheduled:{" "}
-                {payout.scheduledFor
-                  ? new Date(payout.scheduledFor).toLocaleDateString()
-                  : "—"}
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-lg font-semibold">₹{payout.amountInr}</span>
-              <span className="chip">{payout.status}</span>
-            </div>
-          </div>
-        ))}
-      </div>
+      <DataTable
+        data={payouts}
+        columns={columns}
+        emptyState={
+          payoutsQuery.isLoading ? "Loading payouts..." : "No payouts yet."
+        }
+      />
     </div>
   );
 }

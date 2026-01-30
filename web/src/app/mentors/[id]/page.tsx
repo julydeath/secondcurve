@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import InkButton from "@/components/InkButton";
 import { useToast } from "@/components/ToastProvider";
+import { fetchJson } from "@/lib/api";
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -41,6 +43,7 @@ type RecurringRule = {
   durationMinutes: number;
   priceInr: number;
   timezone: string;
+  hasActiveSubscription?: boolean;
 };
 
 const loadRazorpay = () =>
@@ -63,37 +66,37 @@ const loadRazorpay = () =>
 export default function MentorDetailPage() {
   const params = useParams();
   const { pushToast } = useToast();
-  const [mentor, setMentor] = useState<Mentor | null>(null);
-  const [rules, setRules] = useState<RecurringRule[]>([]);
+  const queryClient = useQueryClient();
   const [bookingLoading, setBookingLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   type Slot = NonNullable<Mentor["availabilitySlots"]>[number];
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
   const [openRuleId, setOpenRuleId] = useState<string | null>(null);
 
-  useEffect(() => {
-    const load = async () => {
-      const response = await fetch(`${apiUrl}/mentors/${params.id}`);
-      if (response.ok) {
-        const data = (await response.json()) as { mentor: Mentor };
-        setMentor(data.mentor);
-        if (data.mentor.availabilitySlots?.length) {
-          setSelectedSlot(data.mentor.availabilitySlots[0]);
-        }
-      }
-      const ruleResponse = await fetch(
-        `${apiUrl}/mentors/${params.id}/availability/rules`,
-      );
-      if (ruleResponse.ok) {
-        const data = (await ruleResponse.json()) as { rules: RecurringRule[] };
-        setRules(data.rules);
-      } else {
-        pushToast("Unable to load availability rules", "error");
-      }
-    };
-    load().catch(() => pushToast("Failed to load mentor", "error"));
-  }, [params.id]);
+  const mentorQuery = useQuery({
+    queryKey: ["mentors", params.id],
+    queryFn: () => fetchJson<{ mentor: Mentor }>(`/mentors/${params.id}`),
+  });
 
+  const rulesQuery = useQuery({
+    queryKey: ["mentors", params.id, "rules"],
+    queryFn: () =>
+      fetchJson<{ rules: RecurringRule[] }>(
+        `/mentors/${params.id}/availability/rules`,
+      ),
+  });
+
+  useEffect(() => {
+    if (mentorQuery.isError) {
+      pushToast("Failed to load mentor", "error");
+    }
+    if (rulesQuery.isError) {
+      pushToast("Unable to load availability rules", "error");
+    }
+  }, [mentorQuery.isError, rulesQuery.isError, pushToast]);
+
+  const mentor = mentorQuery.data?.mentor ?? null;
+  const rules = rulesQuery.data?.rules ?? [];
   const slots = mentor?.availabilitySlots ?? [];
   const slotsByRule = slots.reduce<Record<string, Mentor["availabilitySlots"]>>(
     (acc, slot) => {
@@ -130,6 +133,58 @@ export default function MentorDetailPage() {
     }
   }, [rules, slots.length]);
 
+  const createSubscription = useMutation({
+    mutationFn: (ruleId: string) =>
+      fetchJson<{
+        subscription: { id: string };
+        razorpay: { keyId: string; subscriptionId: string };
+      }>("/subscriptions", {
+        method: "POST",
+        json: { availabilityRuleId: ruleId },
+      }),
+  });
+
+  const cancelSubscription = useMutation({
+    mutationFn: (id: string) =>
+      fetchJson(`/subscriptions/${id}/cancel`, { method: "POST" }),
+  });
+
+  const createBooking = useMutation({
+    mutationFn: (slotId: string) =>
+      fetchJson<{
+        booking: { id: string };
+        razorpay: { keyId: string; orderId: string; amount: number; currency: string };
+      }>("/bookings", {
+        method: "POST",
+        json: { availabilitySlotId: slotId },
+      }),
+  });
+
+  const confirmPayment = useMutation({
+    mutationFn: (payload: {
+      bookingId: string;
+      razorpayOrderId: string;
+      razorpayPaymentId: string;
+      razorpaySignature: string;
+    }) =>
+      fetchJson(`/bookings/${payload.bookingId}/confirm-payment`, {
+        method: "POST",
+        json: {
+          razorpayOrderId: payload.razorpayOrderId,
+          razorpayPaymentId: payload.razorpayPaymentId,
+          razorpaySignature: payload.razorpaySignature,
+        },
+      }),
+  });
+
+  const cancelBooking = useMutation({
+    mutationFn: (id: string) =>
+      fetchJson(`/bookings/${id}/cancel`, {
+        method: "POST",
+        json: { reason: "payment_abandoned" },
+      }),
+  });
+
   const handleBookSlot = async (slot: NonNullable<Mentor["availabilitySlots"]>[0]) => {
     try {
       setError(null);
@@ -141,79 +196,64 @@ export default function MentorDetailPage() {
           pushToast("Recurring rule missing for this slot", "error");
           return;
         }
-        const response = await fetch(`${apiUrl}/subscriptions`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ availabilityRuleId: slot.ruleId }),
-        });
-        if (response.status === 401) {
-          window.location.href = "/auth/sign-up";
+        const rule = rules.find((item) => item.id === slot.ruleId);
+        if (rule?.hasActiveSubscription) {
+          setError("This recurring slot already has an active subscription.");
+          pushToast("This recurring slot is already booked", "info");
           return;
         }
-        if (!response.ok) {
+        try {
+          const data = await createSubscription.mutateAsync(slot.ruleId);
+          const loaded = await loadRazorpay();
+          if (!loaded) {
+            setError("Payment SDK failed to load.");
+            pushToast("Payment SDK failed to load", "error");
+            return;
+          }
+          const rzp = new (window as any).Razorpay({
+            key: data.razorpay.keyId,
+            subscription_id: data.razorpay.subscriptionId,
+            name: "WisdomBridge",
+            description: "Weekly mentoring subscription",
+            handler: () => {
+              queryClient.invalidateQueries({ queryKey: ["mentors", params.id] });
+              queryClient.invalidateQueries({
+                queryKey: ["mentors", params.id, "rules"],
+              });
+            },
+            modal: {
+              ondismiss: async () => {
+                await cancelSubscription.mutateAsync(data.subscription.id);
+                queryClient.invalidateQueries({ queryKey: ["mentors", params.id] });
+                queryClient.invalidateQueries({
+                  queryKey: ["mentors", params.id, "rules"],
+                });
+                pushToast("Subscription canceled", "info");
+              },
+            },
+            theme: { color: "#000000" },
+          });
+          rzp.open();
+          pushToast("Subscription started", "success");
+          return;
+        } catch (err) {
           setError("Unable to start subscription. Please try again.");
           pushToast("Subscription could not start", "error");
           return;
         }
-        const data = (await response.json()) as {
-          subscription: { id: string };
-          razorpay: { keyId: string; subscriptionId: string };
-        };
-        const loaded = await loadRazorpay();
-        if (!loaded) {
-          setError("Payment SDK failed to load.");
-          pushToast("Payment SDK failed to load", "error");
-          return;
-        }
-        const rzp = new (window as any).Razorpay({
-          key: data.razorpay.keyId,
-          subscription_id: data.razorpay.subscriptionId,
-          name: "WisdomBridge",
-          description: "Weekly mentoring subscription",
-          handler: () => {
-            // Webhook will confirm and schedule next booking.
-          },
-          modal: {
-            ondismiss: async () => {
-              await fetch(`${apiUrl}/subscriptions/${data.subscription.id}/cancel`, {
-                method: "POST",
-                credentials: "include",
-              });
-              pushToast("Subscription canceled", "info");
-            },
-          },
-          theme: { color: "#000000" },
-        });
-        rzp.open();
-        pushToast("Subscription started", "success");
-        return;
       }
 
-      const response = await fetch(`${apiUrl}/bookings`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ availabilitySlotId: slot.id }),
-      });
-      if (response.status === 401) {
-        window.location.href = "/auth/sign-up";
-        return;
-      }
-      if (!response.ok) {
+      let data: {
+        booking: { id: string };
+        razorpay: { keyId: string; orderId: string; amount: number; currency: string };
+      };
+      try {
+        data = await createBooking.mutateAsync(slot.id);
+      } catch {
         setError("Unable to create booking. Please try another slot.");
         pushToast("Unable to create booking", "error");
         return;
       }
-      const data = (await response.json()) as {
-        booking: { id: string };
-        razorpay: {
-          keyId: string;
-          orderId: string;
-          amount: number;
-          currency: string;
-        };
-      };
 
       const loaded = await loadRazorpay();
       if (!loaded) {
@@ -233,25 +273,20 @@ export default function MentorDetailPage() {
           razorpay_payment_id: string;
           razorpay_signature: string;
         }) => {
-          await fetch(`${apiUrl}/bookings/${data.booking.id}/confirm-payment`, {
-            method: "POST",
-            credentials: "include",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              razorpayOrderId: response.razorpay_order_id,
-              razorpayPaymentId: response.razorpay_payment_id,
-              razorpaySignature: response.razorpay_signature,
-            }),
+          await confirmPayment.mutateAsync({
+            bookingId: data.booking.id,
+            razorpayOrderId: response.razorpay_order_id,
+            razorpayPaymentId: response.razorpay_payment_id,
+            razorpaySignature: response.razorpay_signature,
           });
+          queryClient.invalidateQueries({ queryKey: ["mentors", params.id] });
+          queryClient.invalidateQueries({ queryKey: ["mentors", params.id, "rules"] });
         },
         modal: {
           ondismiss: async () => {
-            await fetch(`${apiUrl}/bookings/${data.booking.id}/cancel`, {
-              method: "POST",
-              credentials: "include",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ reason: "payment_abandoned" }),
-            });
+            await cancelBooking.mutateAsync(data.booking.id);
+            queryClient.invalidateQueries({ queryKey: ["mentors", params.id] });
+            queryClient.invalidateQueries({ queryKey: ["mentors", params.id, "rules"] });
             pushToast("Booking canceled", "info");
           },
         },
@@ -338,6 +373,7 @@ export default function MentorDetailPage() {
           <div className="space-y-4 max-h-[520px] overflow-y-auto pr-1">
             {rules.map((rule) => {
               const ruleSlots = slotsByRule[rule.id] ?? [];
+              const isRuleBooked = Boolean(rule.hasActiveSubscription);
               const grouped = ruleSlots.reduce<
                 Record<string, Mentor["availabilitySlots"]>
               >((acc, slot) => {
@@ -373,6 +409,11 @@ export default function MentorDetailPage() {
                           {new Date(nextSlot.startAt).toLocaleString()}
                         </p>
                       )}
+                      {isRuleBooked && (
+                        <p className="mt-1 text-[10px] uppercase tracking-widest text-red-700">
+                          Subscription active • Fully booked
+                        </p>
+                      )}
                     </div>
                     <span className="text-xs uppercase tracking-widest">
                       {isOpen ? "Hide" : "View"}
@@ -387,7 +428,11 @@ export default function MentorDetailPage() {
                           </div>
                           <div className="grid gap-2 p-3 sm:grid-cols-2">
                             {(daySlots ?? []).map((slot) => {
-                              const isAvailable = slot.status === "AVAILABLE";
+                              const isAvailable =
+                                slot.status === "AVAILABLE" && !isRuleBooked;
+                              const displayStatus = isRuleBooked
+                                ? "BOOKED"
+                                : slot.status;
                               return (
                                 <button
                                   key={slot.id}
@@ -397,9 +442,7 @@ export default function MentorDetailPage() {
                                       : ""
                                   }`}
                                   onClick={() => setSelectedSlot(slot)}
-                                  disabled={
-                                    !isAvailable && slot.status !== "RESERVED"
-                                  }
+                                  disabled={!isAvailable}
                                 >
                                   <div className="flex items-center justify-between">
                                     <span>
@@ -413,7 +456,7 @@ export default function MentorDetailPage() {
                                     <span>₹{slot.priceInr}</span>
                                   </div>
                                   <div className="mt-1 text-[10px] uppercase tracking-widest text-[var(--ink-700)]">
-                                    {slot.status}
+                                    {displayStatus}
                                   </div>
                                 </button>
                               );
@@ -448,10 +491,27 @@ export default function MentorDetailPage() {
               <p className="text-xs text-[var(--ink-700)]">
                 {selectedSlot.durationMinutes} mins • ₹{selectedSlot.priceInr}
               </p>
-              <p className="text-xs text-[var(--ink-700)]">
-                Status: {selectedSlot.status}
-              </p>
-              {selectedSlot.status === "AVAILABLE" && (
+              {(() => {
+                const rule = selectedSlot.ruleId
+                  ? rules.find((item) => item.id === selectedSlot.ruleId)
+                  : null;
+                const isRuleBooked = Boolean(rule?.hasActiveSubscription);
+                const displayStatus = isRuleBooked
+                  ? "BOOKED"
+                  : selectedSlot.status;
+                return (
+                  <p className="text-xs text-[var(--ink-700)]">
+                    Status: {displayStatus}
+                  </p>
+                );
+              })()}
+              {(() => {
+                const rule = selectedSlot.ruleId
+                  ? rules.find((item) => item.id === selectedSlot.ruleId)
+                  : null;
+                const isRuleBooked = Boolean(rule?.hasActiveSubscription);
+                return selectedSlot.status === "AVAILABLE" && !isRuleBooked;
+              })() && (
                 <InkButton
                   loading={bookingLoading === selectedSlot.id}
                   onClick={() => handleBookSlot(selectedSlot)}

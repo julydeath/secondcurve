@@ -748,12 +748,21 @@ authRouter.get(
   asyncHandler(async (req, res) => {
     const accounts = await prisma.oAuthAccount.findMany({
       where: { userId: req.user!.id },
-      select: { provider: true },
+      select: { provider: true, scopes: true },
     });
     const providers = new Set(accounts.map((account) => account.provider));
+    const googleAccount = accounts.find(
+      (account) => account.provider === OAuthProvider.GOOGLE,
+    );
+    const googleCalendarLinked = Boolean(
+      googleAccount?.scopes?.includes(
+        "https://www.googleapis.com/auth/calendar.events",
+      ),
+    );
     return res.json({
       googleLinked: providers.has(OAuthProvider.GOOGLE),
       linkedinLinked: providers.has(OAuthProvider.LINKEDIN),
+      googleCalendarLinked,
     });
   })
 );

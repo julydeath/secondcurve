@@ -35,6 +35,23 @@ subscriptionRouter.post(
       throw new HttpError(404, "rule_not_found");
     }
 
+    const existingSubscription = await prisma.subscription.findFirst({
+      where: {
+        availabilityRuleId: rule.id,
+        status: {
+          in: [
+            SubscriptionStatus.CREATED,
+            SubscriptionStatus.ACTIVE,
+            SubscriptionStatus.PAUSED,
+            SubscriptionStatus.PAST_DUE,
+          ],
+        },
+      },
+    });
+    if (existingSubscription) {
+      throw new HttpError(409, "rule_unavailable");
+    }
+
     const slot = await findOrCreateNextSlot(rule, new Date());
     if (slot.status !== AvailabilityStatus.AVAILABLE) {
       throw new HttpError(409, "slot_unavailable");

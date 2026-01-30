@@ -1,11 +1,26 @@
 import { Router } from "express";
-import { AvailabilityStatus, OAuthProvider, Prisma, Role, UserStatus } from "@prisma/client";
+import {
+  AvailabilityMode,
+  AvailabilityStatus,
+  OAuthProvider,
+  Prisma,
+  Role,
+  SubscriptionStatus,
+  UserStatus,
+} from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { HttpError, asyncHandler } from "../lib/http";
 import { requireAuth, requireRole } from "../lib/auth";
 
 export const mentorRouter = Router();
+
+const activeSubscriptionStatuses = [
+  SubscriptionStatus.CREATED,
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.PAUSED,
+  SubscriptionStatus.PAST_DUE,
+];
 
 const ensureLinkedIn = async (mentorId: string) => {
   const linkedIn = await prisma.oAuthAccount.findFirst({
@@ -171,7 +186,37 @@ mentorRouter.get(
       throw new HttpError(404, "mentor_not_found");
     }
 
-    return res.json({ mentor });
+    const ruleIds = mentor.availabilitySlots
+      .map((slot) => slot.ruleId)
+      .filter((id): id is string => Boolean(id));
+    const activeSubscriptions = ruleIds.length
+      ? await prisma.subscription.findMany({
+          where: {
+            availabilityRuleId: { in: ruleIds },
+            status: { in: activeSubscriptionStatuses },
+          },
+          select: { availabilityRuleId: true },
+        })
+      : [];
+    const bookedRuleIds = new Set(
+      activeSubscriptions.map((sub) => sub.availabilityRuleId),
+    );
+
+    const availabilitySlots = mentor.availabilitySlots.map((slot) => {
+      if (slot.mode === AvailabilityMode.RECURRING && slot.ruleId) {
+        if (bookedRuleIds.has(slot.ruleId)) {
+          return { ...slot, status: AvailabilityStatus.BOOKED };
+        }
+      }
+      return slot;
+    });
+
+    return res.json({
+      mentor: {
+        ...mentor,
+        availabilitySlots,
+      },
+    });
   })
 );
 
@@ -311,7 +356,27 @@ mentorRouter.get(
       where: { mentorId: req.user!.id },
       orderBy: { createdAt: "desc" },
     });
-    return res.json({ rules });
+    const ruleIds = rules.map((rule) => rule.id);
+    const activeSubscriptions = ruleIds.length
+      ? await prisma.subscription.findMany({
+          where: {
+            mentorId: req.user!.id,
+            availabilityRuleId: { in: ruleIds },
+            status: { in: activeSubscriptionStatuses },
+          },
+          select: { availabilityRuleId: true },
+        })
+      : [];
+    const bookedRuleIds = new Set(
+      activeSubscriptions.map((sub) => sub.availabilityRuleId),
+    );
+
+    const enriched = rules.map((rule) => ({
+      ...rule,
+      hasActiveSubscription: bookedRuleIds.has(rule.id),
+    }));
+
+    return res.json({ rules: enriched });
   })
 );
 
@@ -376,7 +441,7 @@ mentorRouter.delete(
 );
 
 const ruleGenerateSchema = z.object({
-  weeks: z.number().int().min(1).max(52).default(4),
+  weeks: z.number().int().min(1).default(4),
   startDate: z.string().datetime().optional(),
 });
 
@@ -531,7 +596,35 @@ mentorRouter.get(
         },
       },
     });
-    return res.json({ slots });
+    const recurringRuleIds = slots
+      .filter((slot) => slot.mode === AvailabilityMode.RECURRING && slot.ruleId)
+      .map((slot) => slot.ruleId as string);
+    const activeSubscriptions = recurringRuleIds.length
+      ? await prisma.subscription.findMany({
+          where: {
+            mentorId: req.user!.id,
+            availabilityRuleId: { in: recurringRuleIds },
+            status: { in: activeSubscriptionStatuses },
+          },
+          select: { availabilityRuleId: true },
+        })
+      : [];
+    const bookedRuleIds = new Set(
+      activeSubscriptions.map((sub) => sub.availabilityRuleId),
+    );
+
+    const enrichedSlots = slots.map((slot) => {
+      if (
+        slot.mode === AvailabilityMode.RECURRING &&
+        slot.ruleId &&
+        bookedRuleIds.has(slot.ruleId)
+      ) {
+        return { ...slot, status: AvailabilityStatus.BOOKED };
+      }
+      return slot;
+    });
+
+    return res.json({ slots: enrichedSlots });
   })
 );
 
@@ -561,11 +654,26 @@ mentorRouter.get(
     const mentorId = String(req.params.id);
     const from = req.query.from ? new Date(String(req.query.from)) : undefined;
     const to = req.query.to ? new Date(String(req.query.to)) : undefined;
+    const blockedRuleIds = new Set(
+      (
+        await prisma.subscription.findMany({
+          where: {
+            mentorId,
+            status: { in: activeSubscriptionStatuses },
+          },
+          select: { availabilityRuleId: true },
+        })
+      ).map((sub) => sub.availabilityRuleId),
+    );
+
     const slots = await prisma.availabilitySlot.findMany({
       where: {
         mentorId,
         status: AvailabilityStatus.AVAILABLE,
         startAt: { gte: from, lte: to },
+        ...(blockedRuleIds.size
+          ? { ruleId: { notIn: Array.from(blockedRuleIds) } }
+          : {}),
       },
       orderBy: { startAt: "asc" },
     });
@@ -602,7 +710,27 @@ mentorRouter.get(
       orderBy: { createdAt: "desc" },
     });
 
-    return res.json({ rules });
+    const ruleIds = rules.map((rule) => rule.id);
+    const activeSubscriptions = ruleIds.length
+      ? await prisma.subscription.findMany({
+          where: {
+            mentorId,
+            availabilityRuleId: { in: ruleIds },
+            status: { in: activeSubscriptionStatuses },
+          },
+          select: { availabilityRuleId: true },
+        })
+      : [];
+    const bookedRuleIds = new Set(
+      activeSubscriptions.map((sub) => sub.availabilityRuleId),
+    );
+
+    const enriched = rules.map((rule) => ({
+      ...rule,
+      hasActiveSubscription: bookedRuleIds.has(rule.id),
+    }));
+
+    return res.json({ rules: enriched });
   })
 );
 

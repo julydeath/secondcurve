@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
+import { ColumnDef } from "@tanstack/react-table";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import InkButton from "@/components/InkButton";
+import DataTable from "@/components/DataTable";
 import { useToast } from "@/components/ToastProvider";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { fetchJson } from "@/lib/api";
 
 type Booking = {
   id: string;
@@ -20,182 +21,127 @@ type Booking = {
 
 export default function MentorSessions() {
   const { pushToast } = useToast();
-  const [sessions, setSessions] = useState<Booking[]>([]);
-  const [loading, setLoading] = useState(true);
   const [linkDrafts, setLinkDrafts] = useState<Record<string, string>>({});
-  const [savingLinkId, setSavingLinkId] = useState<string | null>(null);
-  const [openRule, setOpenRule] = useState<string | null>(null);
 
-  useEffect(() => {
-    const load = async () => {
-      const response = await fetch(`${apiUrl}/bookings/me?as=MENTOR`, {
-        credentials: "include",
-      });
-      if (response.ok) {
-        const data = (await response.json()) as { bookings: Booking[] };
-        setSessions(
-          data.bookings.sort(
-            (a, b) =>
-              new Date(b.scheduledStartAt).getTime() -
-              new Date(a.scheduledStartAt).getTime(),
-          ),
-        );
-      }
-      setLoading(false);
-    };
-    load();
-  }, []);
+  const sessionsQuery = useQuery({
+    queryKey: ["bookings", "me", "mentor"],
+    queryFn: () => fetchJson<{ bookings: Booking[] }>("/bookings/me?as=MENTOR"),
+  });
 
-  const statusTone = (booking: Booking) => {
-    if (booking.status === "CANCELED") return "bg-red-100 text-red-900 border-red-900";
-    if (booking.payment?.status === "CAPTURED")
-      return "bg-green-100 text-green-900 border-green-900";
-    return "bg-yellow-100 text-yellow-900 border-yellow-900";
-  };
+  const saveMeetingLink = useMutation({
+    mutationFn: ({ id, link }: { id: string; link: string }) =>
+      fetchJson(`/bookings/${id}/meeting-link`, {
+        method: "PATCH",
+        json: { meetingLink: link },
+      }),
+    onSuccess: () => pushToast("Meeting link saved", "success"),
+    onError: () => pushToast("Failed to save meeting link", "error"),
+  });
 
-  const statusLabel = (booking: Booking) => {
-    if (booking.status === "CANCELED") return "Cancelled";
-    if (booking.payment?.status === "CAPTURED") return "Paid";
-    return "Reserved";
-  };
-
-  const groupSessions = (items: Booking[]) => {
-    const map = new Map<string, Booking[]>();
-    items.forEach((booking) => {
-      const ruleTitle =
-        booking.availabilitySlot?.rule?.title ?? "One-time Sessions";
-      if (!map.has(ruleTitle)) map.set(ruleTitle, []);
-      map.get(ruleTitle)!.push(booking);
-    });
-    const groups = Array.from(map.entries()).map(([rule, list]) => {
-      const sorted = [...list].sort(
-        (a, b) =>
-          new Date(b.scheduledStartAt).getTime() -
-          new Date(a.scheduledStartAt).getTime(),
-      );
-      return { rule, sessions: sorted, next: sorted[0] };
-    });
-    return groups.sort(
+  const sessions = useMemo(() => {
+    const data = sessionsQuery.data?.bookings ?? [];
+    return [...data].sort(
       (a, b) =>
-        new Date(b.next.scheduledStartAt).getTime() -
-        new Date(a.next.scheduledStartAt).getTime(),
+        new Date(b.scheduledStartAt).getTime() -
+        new Date(a.scheduledStartAt).getTime(),
     );
-  };
+  }, [sessionsQuery.data]);
 
-  useEffect(() => {
-    setOpenRule(null);
-  }, [sessions.length]);
-
-  const saveMeetingLink = async (bookingId: string) => {
-    const link = linkDrafts[bookingId];
-    if (!link) return;
-    setSavingLinkId(bookingId);
-    const response = await fetch(`${apiUrl}/bookings/${bookingId}/meeting-link`, {
-      method: "PATCH",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ meetingLink: link }),
-    });
-    if (!response.ok) {
-      pushToast("Failed to save meeting link", "error");
-    } else {
-      pushToast("Meeting link saved", "success");
-    }
-    setSavingLinkId(null);
-  };
+  const columns = useMemo<ColumnDef<Booking>[]>(
+    () => [
+      {
+        header: "Learner",
+        cell: ({ row }) => (
+          <div>
+            <p className="text-sm font-semibold">{row.original.learner.name}</p>
+            <p className="text-xs text-[var(--ink-700)]">
+              {row.original.availabilitySlot?.rule?.title ?? "One-time"}
+            </p>
+          </div>
+        ),
+      },
+      {
+        header: "Date",
+        cell: ({ row }) => (
+          <div>
+            <p>{new Date(row.original.scheduledStartAt).toLocaleDateString()}</p>
+            <p className="text-xs text-[var(--ink-700)]">
+              {new Date(row.original.scheduledStartAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </p>
+          </div>
+        ),
+      },
+      {
+        header: "Price",
+        accessorFn: (row) => `₹${row.priceInr}`,
+      },
+      {
+        header: "Payment",
+        cell: ({ row }) => {
+          const booking = row.original;
+          const label =
+            booking.status === "CANCELED"
+              ? "Cancelled"
+              : booking.payment?.status === "CAPTURED"
+              ? "Paid"
+              : "Reserved";
+          const tone =
+            booking.status === "CANCELED"
+              ? "bg-red-100 text-red-900 border-red-900"
+              : booking.payment?.status === "CAPTURED"
+              ? "bg-green-100 text-green-900 border-green-900"
+              : "bg-yellow-100 text-yellow-900 border-yellow-900";
+          return <span className={`chip ${tone}`}>{label}</span>;
+        },
+      },
+      {
+        header: "Meeting Link",
+        cell: ({ row }) => (
+          <div className="flex flex-col gap-2">
+            <input
+              className="ink-border px-3 py-2 text-xs"
+              placeholder="Paste meeting link"
+              value={linkDrafts[row.original.id] ?? row.original.meetingLink ?? ""}
+              onChange={(event) =>
+                setLinkDrafts((prev) => ({
+                  ...prev,
+                  [row.original.id]: event.target.value,
+                }))
+              }
+            />
+            <InkButton
+              loading={saveMeetingLink.isPending}
+              onClick={() =>
+                saveMeetingLink.mutate({
+                  id: row.original.id,
+                  link: linkDrafts[row.original.id] ?? row.original.meetingLink ?? "",
+                })
+              }
+            >
+              Save Link
+            </InkButton>
+          </div>
+        ),
+      },
+    ],
+    [linkDrafts, saveMeetingLink],
+  );
 
   return (
     <div className="space-y-6">
-      <h2 className="newsprint-title text-xl">Upcoming Sessions</h2>
-      <div className="ink-border divide-y-2 divide-black">
-        {loading && (
-          <div className="p-6 space-y-3">
-            {Array.from({ length: 3 }).map((_, index) => (
-              <div key={`session-skel-${index}`} className="space-y-2">
-                <div className="skeleton skeleton-line w-1/3" />
-                <div className="skeleton skeleton-line w-1/2" />
-              </div>
-            ))}
-          </div>
-        )}
-        {!loading && sessions.length === 0 && (
-          <div className="px-5 py-4 text-sm text-[var(--ink-700)]">
-            No upcoming sessions.
-          </div>
-        )}
-        {!loading &&
-          groupSessions(sessions).map((group) => (
-            <div key={group.rule} className="ink-border">
-              <button
-                className="flex w-full items-center justify-between px-4 py-3"
-                onClick={() =>
-                  setOpenRule(openRule === group.rule ? null : group.rule)
-                }
-              >
-                <div>
-                  <p className="text-xs uppercase tracking-widest">{group.rule}</p>
-                  <p className="mt-1 text-xs text-[var(--ink-700)]">
-                    Latest:{" "}
-                    {new Date(group.next.scheduledStartAt).toLocaleString()}
-                  </p>
-                </div>
-                <span className="text-xs uppercase tracking-widest">
-                  {openRule === group.rule ? "Hide" : "View"}
-                </span>
-              </button>
-              {openRule === group.rule && (
-                <div className="border-t-2 border-black divide-y-2 divide-black">
-                  {group.sessions.map((session) => (
-                    <div
-                      key={session.id}
-                      className="grid gap-3 px-5 py-4 sm:grid-cols-[180px_1fr_auto]"
-                    >
-                      <div>
-                        <p className="text-base font-semibold">
-                          {new Date(session.scheduledStartAt).toLocaleDateString()}
-                        </p>
-                        <p className="text-sm text-[var(--ink-700)]">
-                          {new Date(session.scheduledStartAt).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-base font-semibold">{session.learner.name}</p>
-                        <p className="text-sm text-[var(--ink-700)]">
-                          ₹{session.priceInr} • {session.status}
-                        </p>
-                      </div>
-                      <div className="flex flex-col items-start gap-2 sm:items-end">
-                        <span className={`chip ${statusTone(session)}`}>
-                          {statusLabel(session)}
-                        </span>
-                        <input
-                          className="ink-border px-3 py-2 text-xs"
-                          placeholder="Paste meeting link"
-                          value={linkDrafts[session.id] ?? session.meetingLink ?? ""}
-                          onChange={(event) =>
-                            setLinkDrafts((prev) => ({
-                              ...prev,
-                              [session.id]: event.target.value,
-                            }))
-                          }
-                        />
-                        <InkButton
-                          loading={savingLinkId === session.id}
-                          onClick={() => saveMeetingLink(session.id)}
-                        >
-                          Save Link
-                        </InkButton>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-      </div>
+      <h2 className="newsprint-title text-xl">All Sessions</h2>
+      <DataTable
+        data={sessions}
+        columns={columns}
+        emptyState={
+          sessionsQuery.isLoading
+            ? "Loading sessions..."
+            : "No sessions yet."
+        }
+      />
     </div>
   );
 }

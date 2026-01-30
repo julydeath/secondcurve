@@ -11,12 +11,16 @@ app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
 });
 
+const enableAutoRolling = process.env.AUTO_ROLLING === "true";
+
 const startSchedulers = () => {
   const run = async () => {
     await captureDuePayments();
     await cancelOverdueUnpaidBookings();
     await resumeDueSubscriptions();
-    await ensureRollingSlots(8);
+    if (enableAutoRolling) {
+      await ensureRollingSlots(8);
+    }
   };
 
   void run();

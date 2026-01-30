@@ -1,34 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { useQuery } from "@tanstack/react-query";
+import { fetchJson } from "@/lib/api";
 
 type UserRole = "MENTOR" | "LEARNER" | "ADMIN";
 
 export default function ProfilePage() {
-  const [user, setUser] = useState<{ name: string; role: UserRole } | null>(
-    null
-  );
+  const userQuery = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () => fetchJson<{ user: { name: string; role: UserRole } }>("/auth/me"),
+  });
 
-  useEffect(() => {
-    const load = async () => {
-      const response = await fetch(`${apiUrl}/auth/me`, {
-        credentials: "include",
-      });
-      if (response.ok) {
-        const data = (await response.json()) as {
-          user: { name: string; role: UserRole };
-        };
-        setUser(data.user);
-      }
-    };
-    load();
-  }, []);
-
-  if (!user) {
+  if (userQuery.isLoading || !userQuery.data) {
     return (
       <div className="mx-auto max-w-6xl px-6 py-12">
         <div className="ink-border paper-texture p-6">
@@ -40,6 +24,8 @@ export default function ProfilePage() {
       </div>
     );
   }
+
+  const user = userQuery.data.user;
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-12 space-y-6">

@@ -2,8 +2,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import InkButton from "@/components/InkButton";
 import { useToast } from "@/components/ToastProvider";
+import { fetchJson } from "@/lib/api";
 
 const apiUrl =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -40,11 +42,13 @@ const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export default function MentorAvailability() {
   const { pushToast } = useToast();
+  const queryClient = useQueryClient();
   const [rules, setRules] = useState<Rule[]>([]);
   const [slots, setSlots] = useState<Slot[]>([]);
   const [links, setLinks] = useState({
     googleLinked: false,
     linkedinLinked: false,
+    googleCalendarLinked: false,
   });
   const [error, setError] = useState<string | null>(null);
   const [loadingRule, setLoadingRule] = useState(false);
@@ -53,6 +57,7 @@ export default function MentorAvailability() {
   const [openSlotsRule, setOpenSlotsRule] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [pauseWeeks, setPauseWeeks] = useState<Record<string, number>>({});
+  const [generateWeeks, setGenerateWeeks] = useState<Record<string, number>>({});
   const [editForm, setEditForm] = useState({
     weekday: 1,
     startTime: "10:00",
@@ -74,43 +79,42 @@ export default function MentorAvailability() {
     active: true,
   });
 
-  const loadRules = async () => {
-    const response = await fetch(`${apiUrl}/mentors/me/availability/rules`, {
-      credentials: "include",
-    });
-    if (response.ok) {
-      const data = (await response.json()) as { rules: Rule[] };
-      setRules(data.rules);
-    }
-  };
+  const rulesQuery = useQuery({
+    queryKey: ["mentor", "availability", "rules"],
+    queryFn: () => fetchJson<{ rules: Rule[] }>("/mentors/me/availability/rules"),
+  });
 
-  const loadSlots = async () => {
-    const response = await fetch(`${apiUrl}/mentors/me/availability/slots`, {
-      credentials: "include",
-    });
-    if (response.ok) {
-      const data = (await response.json()) as { slots: Slot[] };
-      setSlots(data.slots);
-    }
-  };
+  const slotsQuery = useQuery({
+    queryKey: ["mentor", "availability", "slots"],
+    queryFn: () => fetchJson<{ slots: Slot[] }>("/mentors/me/availability/slots"),
+  });
+
+  const linksQuery = useQuery({
+    queryKey: ["auth", "links"],
+    queryFn: () =>
+      fetchJson<{
+        googleLinked: boolean;
+        linkedinLinked: boolean;
+        googleCalendarLinked?: boolean;
+      }>("/auth/links"),
+  });
 
   useEffect(() => {
-    loadRules();
-    loadSlots();
-    const loadLinks = async () => {
-      const response = await fetch(`${apiUrl}/auth/links`, {
-        credentials: "include",
+    if (rulesQuery.data?.rules) setRules(rulesQuery.data.rules);
+  }, [rulesQuery.data]);
+
+  useEffect(() => {
+    if (slotsQuery.data?.slots) setSlots(slotsQuery.data.slots);
+  }, [slotsQuery.data]);
+
+  useEffect(() => {
+    if (linksQuery.data) {
+      setLinks({
+        ...linksQuery.data,
+        googleCalendarLinked: linksQuery.data.googleCalendarLinked ?? false,
       });
-      if (response.ok) {
-        const data = (await response.json()) as {
-          googleLinked: boolean;
-          linkedinLinked: boolean;
-        };
-        setLinks(data);
-      }
-    };
-    loadLinks();
-  }, []);
+    }
+  }, [linksQuery.data]);
 
   useEffect(() => {
     setOpenRule(null);
@@ -124,55 +128,61 @@ export default function MentorAvailability() {
         (slot.booking || slot.status === "BOOKED" || slot.status === "RESERVED"),
     );
 
-  const createRule = async () => {
-    setError(null);
-    setLoadingRule(true);
-    const response = await fetch(`${apiUrl}/mentors/me/availability/rules`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        ...form,
-        meetingLink: form.meetingLink ? form.meetingLink : undefined,
-      }),
-    });
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => ({}))) as {
-        error?: string;
-      };
-      setError(payload.error ?? "Failed to save availability.");
-      pushToast(payload.error ?? "Failed to save availability", "error");
-    } else {
-      await loadRules();
+  const createRule = useMutation({
+    mutationFn: async () => {
+      setError(null);
+      setLoadingRule(true);
+      return fetchJson("/mentors/me/availability/rules", {
+        method: "POST",
+        json: {
+          ...form,
+          meetingLink: form.meetingLink ? form.meetingLink : undefined,
+        },
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["mentor", "availability", "rules"],
+      });
       pushToast("Availability rule created", "success");
-    }
-    setLoadingRule(false);
-  };
+      setLoadingRule(false);
+    },
+    onError: (err: Error) => {
+      setError(err.message ?? "Failed to save availability.");
+      pushToast(err.message ?? "Failed to save availability", "error");
+      setLoadingRule(false);
+    },
+  });
 
-  const generateSlots = async (ruleId: string) => {
-    setError(null);
-    await fetch(`${apiUrl}/mentors/me/availability/rules/${ruleId}/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ weeks: 4 }),
-    });
-    await loadSlots();
-    pushToast("Slots generated for next 4 weeks", "success");
-  };
+  const generateSlots = useMutation({
+    mutationFn: ({ ruleId, weeks }: { ruleId: string; weeks: number }) =>
+      fetchJson(`/mentors/me/availability/rules/${ruleId}/generate`, {
+        method: "POST",
+        json: { weeks },
+      }),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({
+        queryKey: ["mentor", "availability", "slots"],
+      });
+      pushToast(`Slots generated for next ${variables.weeks} weeks`, "success");
+    },
+    onError: () => pushToast("Failed to generate slots", "error"),
+  });
 
-  const deleteRule = async (ruleId: string) => {
-    setError(null);
-    await fetch(`${apiUrl}/mentors/me/availability/rules/${ruleId}`, {
-      method: "DELETE",
-      credentials: "include",
-    });
-    if (editingRuleId === ruleId) {
-      setEditingRuleId(null);
-    }
-    await loadRules();
-    pushToast("Availability rule deleted", "info");
-  };
+  const deleteRule = useMutation({
+    mutationFn: (ruleId: string) =>
+      fetchJson(`/mentors/me/availability/rules/${ruleId}`, {
+        method: "DELETE",
+      }),
+    onSuccess: async () => {
+      if (editingRuleId) setEditingRuleId(null);
+      await queryClient.invalidateQueries({
+        queryKey: ["mentor", "availability", "rules"],
+      });
+      pushToast("Availability rule deleted", "info");
+    },
+    onError: () => pushToast("Failed to delete rule", "error"),
+  });
 
   const startEdit = (rule: Rule) => {
     setEditingRuleId(rule.id);
@@ -188,75 +198,90 @@ export default function MentorAvailability() {
     });
   };
 
-  const saveEdit = async () => {
-    if (!editingRuleId) return;
-    setError(null);
-    await fetch(`${apiUrl}/mentors/me/availability/rules/${editingRuleId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        ...editForm,
-        meetingLink: editForm.meetingLink ? editForm.meetingLink : undefined,
-      }),
-    });
-    setEditingRuleId(null);
-    await loadRules();
-    pushToast("Availability rule updated", "success");
-  };
+  const saveEdit = useMutation({
+    mutationFn: () => {
+      if (!editingRuleId) return Promise.resolve(null);
+      setError(null);
+      return fetchJson(`/mentors/me/availability/rules/${editingRuleId}`, {
+        method: "PATCH",
+        json: {
+          ...editForm,
+          meetingLink: editForm.meetingLink ? editForm.meetingLink : undefined,
+        },
+      });
+    },
+    onSuccess: async () => {
+      setEditingRuleId(null);
+      await queryClient.invalidateQueries({
+        queryKey: ["mentor", "availability", "rules"],
+      });
+      pushToast("Availability rule updated", "success");
+    },
+    onError: () => pushToast("Failed to update rule", "error"),
+  });
 
-  const toggleSlot = async (slot: Slot) => {
-    setError(null);
-    const nextStatus = slot.status === "BLOCKED" ? "AVAILABLE" : "BLOCKED";
-    await fetch(`${apiUrl}/mentors/me/availability/slots/${slot.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ status: nextStatus }),
-    });
-    await loadSlots();
-    pushToast(
-      nextStatus === "BLOCKED" ? "Slot blocked" : "Slot unblocked",
-      "info",
-    );
-  };
+  const toggleSlot = useMutation({
+    mutationFn: (slot: Slot) => {
+      setError(null);
+      const nextStatus = slot.status === "BLOCKED" ? "AVAILABLE" : "BLOCKED";
+      return fetchJson(`/mentors/me/availability/slots/${slot.id}`, {
+        method: "PATCH",
+        json: { status: nextStatus },
+      });
+    },
+    onSuccess: async (_data, slot) => {
+      await queryClient.invalidateQueries({
+        queryKey: ["mentor", "availability", "slots"],
+      });
+      const nextStatus = slot.status === "BLOCKED" ? "AVAILABLE" : "BLOCKED";
+      pushToast(
+        nextStatus === "BLOCKED" ? "Slot blocked" : "Slot unblocked",
+        "info",
+      );
+    },
+    onError: () => pushToast("Unable to update slot", "error"),
+  });
 
-  const pauseSubscription = async (subscriptionId: string) => {
-    setActionLoading(subscriptionId);
-    const weeks = pauseWeeks[subscriptionId] ?? 1;
-    const response = await fetch(
-      `${apiUrl}/subscriptions/${subscriptionId}/pause`,
-      {
+  const pauseSubscription = useMutation({
+    mutationFn: ({ subscriptionId, weeks }: { subscriptionId: string; weeks: number }) => {
+      setActionLoading(subscriptionId);
+      return fetchJson(`/subscriptions/${subscriptionId}/pause`, {
         method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ weeks }),
-      },
-    );
-    if (!response.ok) {
-      pushToast("Unable to pause subscription", "error");
-    } else {
+        json: { weeks },
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["mentor", "availability", "slots"],
+      });
       pushToast("Subscription paused for selected weeks", "info");
-    }
-    setActionLoading(null);
-  };
+      setActionLoading(null);
+    },
+    onError: () => {
+      pushToast("Unable to pause subscription", "error");
+      setActionLoading(null);
+    },
+  });
 
-  const resumeSubscription = async (subscriptionId: string) => {
-    setActionLoading(subscriptionId);
-    const response = await fetch(
-      `${apiUrl}/subscriptions/${subscriptionId}/resume`,
-      {
+  const resumeSubscription = useMutation({
+    mutationFn: (subscriptionId: string) => {
+      setActionLoading(subscriptionId);
+      return fetchJson(`/subscriptions/${subscriptionId}/resume`, {
         method: "POST",
-        credentials: "include",
-      },
-    );
-    if (!response.ok) {
-      pushToast("Unable to resume subscription", "error");
-    } else {
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["mentor", "availability", "slots"],
+      });
       pushToast("Subscription resumed", "success");
-    }
-    setActionLoading(null);
-  };
+      setActionLoading(null);
+    },
+    onError: () => {
+      pushToast("Unable to resume subscription", "error");
+      setActionLoading(null);
+    },
+  });
 
   return (
     <div className="space-y-8">
@@ -272,7 +297,9 @@ export default function MentorAvailability() {
               window.location.href = `${apiUrl}/auth/google/start?calendar=1&link=1`;
             }}
           >
-            {links.googleLinked ? "Google Calendar Connected" : "Connect Google Calendar"}
+            {links.googleCalendarLinked
+              ? "Google Calendar Connected"
+              : "Connect Google Calendar"}
           </InkButton>
           <InkButton
             onClick={() => {
@@ -282,6 +309,12 @@ export default function MentorAvailability() {
             {links.linkedinLinked ? "LinkedIn Connected" : "Link LinkedIn Profile"}
           </InkButton>
         </div>
+        {!links.googleCalendarLinked && (
+          <p className="mt-2 text-xs text-[var(--ink-700)]">
+            Calendar events won’t appear until you reconnect with calendar
+            permission.
+          </p>
+        )}
         {error && (
           <p className="mt-3 text-xs uppercase tracking-widest text-red-700">
             {error}
@@ -424,7 +457,7 @@ export default function MentorAvailability() {
         </div>
         <InkButton
           className="mt-6"
-          onClick={createRule}
+          onClick={() => createRule.mutate()}
           loading={loadingRule}
           disabled={!links.linkedinLinked}
         >
@@ -477,15 +510,42 @@ export default function MentorAvailability() {
                     >
                       Edit
                     </InkButton>
+                    {rule.mode === "ONE_TIME" && (
+                      <>
+                        <InkButton
+                          className="px-4 py-2"
+                          onClick={() =>
+                            generateSlots.mutate({
+                              ruleId: rule.id,
+                              weeks: generateWeeks[rule.id] ?? 4,
+                            })
+                          }
+                        >
+                          Generate Weeks
+                        </InkButton>
+                        <div className="flex items-center gap-2 text-xs uppercase tracking-widest">
+                          <span>Weeks</span>
+                          <input
+                            type="number"
+                            min={1}
+                            className="ink-border w-20 px-2 py-1 text-xs"
+                            value={generateWeeks[rule.id] ?? 4}
+                            onChange={(event) =>
+                              setGenerateWeeks((prev) => ({
+                                ...prev,
+                                [rule.id]: Math.max(
+                                  1,
+                                  Number(event.target.value) || 1,
+                                ),
+                              }))
+                            }
+                          />
+                        </div>
+                      </>
+                    )}
                     <InkButton
                       className="px-4 py-2"
-                      onClick={() => generateSlots(rule.id)}
-                    >
-                      Generate 4 Weeks
-                    </InkButton>
-                    <InkButton
-                      className="px-4 py-2"
-                      onClick={() => deleteRule(rule.id)}
+                      onClick={() => deleteRule.mutate(rule.id)}
                       disabled={ruleHasBookings(rule.id)}
                       title={
                         ruleHasBookings(rule.id)
@@ -607,7 +667,10 @@ export default function MentorAvailability() {
                   )}
                   {editingRuleId === rule.id && (
                     <div className="flex flex-wrap gap-2">
-                      <InkButton className="px-4 py-2" onClick={saveEdit}>
+                      <InkButton
+                        className="px-4 py-2"
+                        onClick={() => saveEdit.mutate()}
+                      >
                         Save
                       </InkButton>
                       <InkButton
@@ -726,7 +789,13 @@ export default function MentorAvailability() {
                                     className="px-4 py-2"
                                     loading={actionLoading === slot.booking.subscription.id}
                                     onClick={() =>
-                                      pauseSubscription(slot.booking!.subscription!.id)
+                                      pauseSubscription.mutate({
+                                        subscriptionId: slot.booking!.subscription!.id,
+                                        weeks:
+                                          pauseWeeks[
+                                            slot.booking!.subscription!.id
+                                          ] ?? 1,
+                                      })
                                     }
                                   >
                                     Pause
@@ -735,7 +804,9 @@ export default function MentorAvailability() {
                                     className="px-4 py-2"
                                     loading={actionLoading === slot.booking.subscription.id}
                                     onClick={() =>
-                                      resumeSubscription(slot.booking!.subscription!.id)
+                                      resumeSubscription.mutate(
+                                        slot.booking!.subscription!.id,
+                                      )
                                     }
                                   >
                                     Resume
@@ -744,7 +815,7 @@ export default function MentorAvailability() {
                               ) : (
                                 <InkButton
                                   className="px-4 py-2"
-                                  onClick={() => toggleSlot(slot)}
+                                  onClick={() => toggleSlot.mutate(slot)}
                                   disabled={
                                     slot.status === "BOOKED" ||
                                     slot.status === "RESERVED" ||

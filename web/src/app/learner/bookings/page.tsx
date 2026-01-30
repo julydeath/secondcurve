@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
+import { ColumnDef } from "@tanstack/react-table";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import InkButton from "@/components/InkButton";
+import DataTable from "@/components/DataTable";
 import { useToast } from "@/components/ToastProvider";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { apiUrl, fetchJson } from "@/lib/api";
 
 type Booking = {
   id: string;
@@ -17,6 +18,7 @@ type Booking = {
   mentor: { id: string; name: string };
   payment?: { status: string } | null;
   availabilitySlot?: {
+    mode?: "ONE_TIME" | "RECURRING";
     rule?: { title?: string | null } | null;
   } | null;
 };
@@ -31,163 +33,283 @@ type Subscription = {
   availabilityRule?: { title: string } | null;
 };
 
+type Links = { googleLinked: boolean; linkedinLinked: boolean; googleCalendarLinked?: boolean };
+
 export default function LearnerBookings() {
   const { pushToast } = useToast();
-  const [bookings, setBookings] = useState<Booking[]>([]);
-  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
-  const [links, setLinks] = useState({ googleLinked: false });
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const [pauseWeeks, setPauseWeeks] = useState<Record<string, number>>({});
-  const [openRule, setOpenRule] = useState<string | null>(null);
 
-  const load = async () => {
-    setLoading(true);
-    const [bookingRes, subRes, linksRes] = await Promise.all([
-      fetch(`${apiUrl}/bookings/me`, { credentials: "include" }),
-      fetch(`${apiUrl}/subscriptions/me`, { credentials: "include" }),
-      fetch(`${apiUrl}/auth/links`, { credentials: "include" }),
-    ]);
+  const bookingsQuery = useQuery({
+    queryKey: ["bookings", "me"],
+    queryFn: () => fetchJson<{ bookings: Booking[] }>("/bookings/me"),
+  });
 
-    if (bookingRes.ok) {
-      const data = (await bookingRes.json()) as { bookings: Booking[] };
-      setBookings(data.bookings);
-    }
-    if (subRes.ok) {
-      const data = (await subRes.json()) as { subscriptions: Subscription[] };
-      setSubscriptions(data.subscriptions);
-    }
-    if (linksRes.ok) {
-      const data = (await linksRes.json()) as { googleLinked: boolean };
-      setLinks({ googleLinked: data.googleLinked });
-    }
-    setLoading(false);
-  };
+  const subscriptionsQuery = useQuery({
+    queryKey: ["subscriptions", "me"],
+    queryFn: () => fetchJson<{ subscriptions: Subscription[] }>("/subscriptions/me"),
+  });
 
-  const statusTone = (booking: Booking) => {
-    if (booking.status === "CANCELED") return "bg-red-100 text-red-900 border-red-900";
-    if (booking.payment?.status === "CAPTURED")
-      return "bg-green-100 text-green-900 border-green-900";
-    return "bg-yellow-100 text-yellow-900 border-yellow-900";
-  };
+  const linksQuery = useQuery({
+    queryKey: ["auth", "links"],
+    queryFn: () => fetchJson<Links>("/auth/links"),
+  });
 
-  const statusLabel = (booking: Booking) => {
-    if (booking.status === "CANCELED") return "Cancelled";
-    if (booking.payment?.status === "CAPTURED") return "Paid";
-    return "Reserved";
-  };
-
-  const groupBookings = (items: Booking[]) => {
-    const map = new Map<string, Booking[]>();
-    items.forEach((booking) => {
-      const ruleTitle =
-        booking.availabilitySlot?.rule?.title ?? "One-time Sessions";
-      if (!map.has(ruleTitle)) map.set(ruleTitle, []);
-      map.get(ruleTitle)!.push(booking);
-    });
-    const groups = Array.from(map.entries()).map(([rule, list]) => {
-      const sorted = [...list].sort(
-        (a, b) =>
-          new Date(b.scheduledStartAt).getTime() -
-          new Date(a.scheduledStartAt).getTime(),
-      );
-      return { rule, bookings: sorted, next: sorted[0] };
-    });
-    return groups.sort(
-      (a, b) =>
-        new Date(b.next.scheduledStartAt).getTime() -
-        new Date(a.next.scheduledStartAt).getTime(),
-    );
-  };
-
-  useEffect(() => {
-    load().catch(() => {
-      setError("Failed to load bookings.");
-      setLoading(false);
-      pushToast("Failed to load bookings", "error");
-    });
-  }, []);
-
-  const pauseSubscription = async (id: string) => {
-    setActionLoading(id);
-    const weeks = pauseWeeks[id] ?? 1;
-    const response = await fetch(`${apiUrl}/subscriptions/${id}/pause`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ weeks }),
-    });
-    if (!response.ok) {
-      setError("Unable to pause subscription.");
-      pushToast("Unable to pause subscription", "error");
-    } else {
-      await load();
-      pushToast("Subscription paused", "success");
-    }
-    setActionLoading(null);
-  };
-
-  const resumeSubscription = async (id: string) => {
-    setActionLoading(id);
-    const response = await fetch(`${apiUrl}/subscriptions/${id}/resume`, {
-      method: "POST",
-      credentials: "include",
-    });
-    if (!response.ok) {
-      setError("Unable to resume subscription.");
-      pushToast("Unable to resume subscription", "error");
-    } else {
-      await load();
-      pushToast("Subscription resumed", "success");
-    }
-    setActionLoading(null);
-  };
-
-  const cancelSubscription = async (id: string) => {
-    setActionLoading(id);
-    const response = await fetch(`${apiUrl}/subscriptions/${id}/cancel`, {
-      method: "POST",
-      credentials: "include",
-    });
-    if (!response.ok) {
-      setError("Unable to cancel subscription.");
-      pushToast("Unable to cancel subscription", "error");
-    } else {
-      await load();
+  const cancelSubscription = useMutation({
+    mutationFn: (id: string) =>
+      fetchJson(`/subscriptions/${id}/cancel`, { method: "POST" }),
+    onSuccess: async () => {
       pushToast("Subscription canceled", "info");
-    }
-    setActionLoading(null);
-  };
+      await queryClient.invalidateQueries({ queryKey: ["subscriptions", "me"] });
+    },
+    onError: () => pushToast("Unable to cancel subscription", "error"),
+  });
 
-  const cancelBooking = async (booking: Booking) => {
-    setActionLoading(booking.id);
-    const response = await fetch(`${apiUrl}/bookings/${booking.id}/cancel`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: "learner_cancel" }),
-    });
-    if (!response.ok) {
-      pushToast("Unable to cancel booking", "error");
-    } else {
-      await load();
-      pushToast("Booking canceled", "info");
-    }
-    setActionLoading(null);
-  };
+  const pauseSubscription = useMutation({
+    mutationFn: ({ id, weeks }: { id: string; weeks: number }) =>
+      fetchJson(`/subscriptions/${id}/pause`, {
+        method: "POST",
+        json: { weeks },
+      }),
+    onSuccess: async () => {
+      pushToast("Subscription paused", "success");
+      await queryClient.invalidateQueries({ queryKey: ["subscriptions", "me"] });
+    },
+    onError: () => pushToast("Unable to pause subscription", "error"),
+  });
 
-  const addToCalendar = async (bookingId: string) => {
-    const response = await fetch(`${apiUrl}/bookings/${bookingId}/sync-calendar`, {
-      method: "POST",
-      credentials: "include",
-    });
-    if (!response.ok) {
-      pushToast("Calendar sync failed", "error");
-      return;
-    }
-    pushToast("Added to Google Calendar", "success");
-  };
+  const resumeSubscription = useMutation({
+    mutationFn: (id: string) =>
+      fetchJson(`/subscriptions/${id}/resume`, { method: "POST" }),
+    onSuccess: async () => {
+      pushToast("Subscription resumed", "success");
+      await queryClient.invalidateQueries({ queryKey: ["subscriptions", "me"] });
+    },
+    onError: () => pushToast("Unable to resume subscription", "error"),
+  });
+
+  const addToCalendar = useMutation({
+    mutationFn: (bookingId: string) =>
+      fetchJson<{ synced: boolean; mentorAdded?: boolean; learnerAdded?: boolean }>(
+        `/bookings/${bookingId}/sync-calendar`,
+        { method: "POST" },
+      ),
+    onSuccess: () => pushToast("Added to Google Calendar", "success"),
+    onError: () => {
+      pushToast("Calendar not linked. Please connect Google Calendar.", "error");
+      setTimeout(() => {
+        window.location.href = `${apiUrl}/auth/google/start?calendar=1&link=1`;
+      }, 600);
+    },
+  });
+
+  const bookings = bookingsQuery.data?.bookings ?? [];
+  const subscriptions = subscriptionsQuery.data?.subscriptions ?? [];
+  const links = linksQuery.data;
+
+  const bookingColumns = useMemo<ColumnDef<Booking>[]>(
+    () => [
+      {
+        header: "Session",
+        cell: ({ row }) => (
+          <div>
+            <p className="text-sm font-semibold">{row.original.mentor.name}</p>
+            <p className="text-xs text-[var(--ink-700)]">
+              {row.original.availabilitySlot?.rule?.title ?? "One-time"}
+            </p>
+          </div>
+        ),
+      },
+      {
+        header: "Date",
+        cell: ({ row }) => (
+          <div>
+            <p>{new Date(row.original.scheduledStartAt).toLocaleDateString()}</p>
+            <p className="text-xs text-[var(--ink-700)]">
+              {new Date(row.original.scheduledStartAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </p>
+          </div>
+        ),
+      },
+      {
+        header: "Price",
+        accessorFn: (row) => `₹${row.priceInr}`,
+      },
+      {
+        header: "Status",
+        cell: ({ row }) => {
+          const booking = row.original;
+          const label =
+            booking.status === "CANCELED"
+              ? "Cancelled"
+              : booking.payment?.status === "CAPTURED"
+              ? "Paid"
+              : "Reserved";
+          const tone =
+            booking.status === "CANCELED"
+              ? "bg-red-100 text-red-900 border-red-900"
+              : booking.payment?.status === "CAPTURED"
+              ? "bg-green-100 text-green-900 border-green-900"
+              : "bg-yellow-100 text-yellow-900 border-yellow-900";
+          return <span className={`chip ${tone}`}>{label}</span>;
+        },
+      },
+      {
+        header: "Meeting",
+        cell: ({ row }) => (
+          <div className="flex flex-col gap-2">
+            <InkButton
+              disabled={
+                row.original.payment?.status !== "CAPTURED" ||
+                !row.original.meetingLink
+              }
+              onClick={() => {
+                if (!row.original.meetingLink) return;
+                window.open(row.original.meetingLink, "_blank", "noopener,noreferrer");
+              }}
+            >
+              Join
+            </InkButton>
+            <InkButton
+              onClick={() => addToCalendar.mutate(row.original.id)}
+              disabled={row.original.payment?.status !== "CAPTURED"}
+            >
+              Add to Calendar
+            </InkButton>
+          </div>
+        ),
+      },
+      {
+        header: "Actions",
+        cell: ({ row }) => (
+          <div className="flex flex-col gap-2">
+            <InkButton
+              disabled={row.original.payment?.status !== "CAPTURED"}
+              onClick={async () => {
+                const response = await fetch(
+                  `${apiUrl}/bookings/${row.original.id}/receipt`,
+                  { credentials: "include" },
+                );
+                if (!response.ok) {
+                  pushToast("Receipt not ready", "error");
+                  return;
+                }
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `wisdombridge-receipt-${row.original.id}.txt`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.URL.revokeObjectURL(url);
+                pushToast("Receipt downloaded", "success");
+              }}
+            >
+              Receipt
+            </InkButton>
+            <InkButton
+              onClick={() => {
+                window.location.href = `/mentors/${row.original.mentor.id}`;
+              }}
+            >
+              View Mentor
+            </InkButton>
+          </div>
+        ),
+      },
+    ],
+    [addToCalendar, pushToast],
+  );
+
+  const subscriptionColumns = useMemo<ColumnDef<Subscription>[]>(
+    () => [
+      {
+        header: "Plan",
+        cell: ({ row }) => (
+          <div>
+            <p className="text-sm font-semibold">
+              {row.original.availabilityRule?.title ?? "Recurring Mentoring"}
+            </p>
+            <p className="text-xs text-[var(--ink-700)]">
+              ₹{row.original.priceInr} / week
+            </p>
+          </div>
+        ),
+      },
+      {
+        header: "Status",
+        accessorKey: "status",
+      },
+      {
+        header: "Next Charge",
+        cell: ({ row }) =>
+          row.original.nextChargeAt
+            ? new Date(row.original.nextChargeAt).toLocaleDateString()
+            : "—",
+      },
+      {
+        header: "Paused Until",
+        cell: ({ row }) =>
+          row.original.pauseUntil
+            ? new Date(row.original.pauseUntil).toLocaleDateString()
+            : "—",
+      },
+      {
+        header: "Actions",
+        cell: ({ row }) => (
+          <div className="flex flex-wrap gap-2">
+            <label className="flex items-center gap-2 text-xs uppercase tracking-widest text-[var(--ink-700)]">
+              Pause weeks
+              <select
+                className="ink-border px-2 py-1 text-xs"
+                value={pauseWeeks[row.original.id] ?? 1}
+                onChange={(event) =>
+                  setPauseWeeks((prev) => ({
+                    ...prev,
+                    [row.original.id]: Number(event.target.value),
+                  }))
+                }
+              >
+                {[1, 2, 3, 4].map((week) => (
+                  <option key={week} value={week}>
+                    {week}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <InkButton
+              loading={pauseSubscription.isPending}
+              onClick={() =>
+                pauseSubscription.mutate({
+                  id: row.original.id,
+                  weeks: pauseWeeks[row.original.id] ?? 1,
+                })
+              }
+            >
+              Pause
+            </InkButton>
+            <InkButton
+              loading={resumeSubscription.isPending}
+              onClick={() => resumeSubscription.mutate(row.original.id)}
+            >
+              Resume
+            </InkButton>
+            <InkButton
+              loading={cancelSubscription.isPending}
+              onClick={() => cancelSubscription.mutate(row.original.id)}
+            >
+              Cancel
+            </InkButton>
+          </div>
+        ),
+      },
+    ],
+    [pauseWeeks, pauseSubscription, resumeSubscription, cancelSubscription],
+  );
 
   return (
     <div className="space-y-6">
@@ -203,236 +325,35 @@ export default function LearnerBookings() {
             window.location.href = `${apiUrl}/auth/google/start?calendar=1&link=1`;
           }}
         >
-          {links.googleLinked ? "Calendar Connected" : "Connect Calendar"}
+          {links?.googleCalendarLinked
+            ? "Calendar Connected"
+            : "Connect Calendar"}
         </InkButton>
       </div>
-      {error && (
-        <div className="ink-border p-4 text-sm text-[var(--ink-700)]">
-          {error}
-        </div>
-      )}
 
-      <div className="grid gap-4">
-        {loading && (
-          <div className="grid gap-4">
-            {Array.from({ length: 3 }).map((_, index) => (
-              <div key={`booking-skel-${index}`} className="ink-border p-6 space-y-3">
-                <div className="skeleton skeleton-line w-1/2" />
-                <div className="skeleton skeleton-line w-2/3" />
-                <div className="skeleton skeleton-line w-24" />
-              </div>
-            ))}
-          </div>
-        )}
-        {!loading && bookings.length === 0 && (
-          <div className="ink-border p-6 text-sm text-[var(--ink-700)]">
-            No bookings yet.
-          </div>
-        )}
-        {!loading &&
-          groupBookings(bookings).map((group) => (
-            <div key={group.rule} className="ink-border">
-              <button
-                className="flex w-full items-center justify-between px-4 py-3"
-                onClick={() =>
-                  setOpenRule(openRule === group.rule ? null : group.rule)
-                }
-              >
-                <div>
-                  <p className="text-xs uppercase tracking-widest">
-                    {group.rule}
-                  </p>
-                  <p className="mt-1 text-xs text-[var(--ink-700)]">
-                    Latest:{" "}
-                    {new Date(group.next.scheduledStartAt).toLocaleString()}
-                  </p>
-                </div>
-                <span className="text-xs uppercase tracking-widest">
-                  {openRule === group.rule ? "Hide" : "View"}
-                </span>
-              </button>
-              {openRule === group.rule && (
-                <div className="border-t-2 border-black divide-y-2 divide-black">
-                  {group.bookings.map((booking) => (
-                    <div key={booking.id} className="p-6">
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                          <p className="text-base font-semibold">
-                            {booking.mentor.name}
-                          </p>
-                          <p className="text-sm text-[var(--ink-700)]">
-                            {new Date(booking.scheduledStartAt).toLocaleString()}
-                          </p>
-                          <p className="text-xs text-[var(--ink-700)]">
-                            ₹{booking.priceInr} • Payment:{" "}
-                            {booking.payment?.status ?? "N/A"}
-                          </p>
-                          {booking.meetingLink && (
-                            <p className="text-xs text-[var(--ink-700)]">
-                              Meeting link: {booking.meetingLink}
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-3">
-                          <span className={`chip ${statusTone(booking)}`}>
-                            {statusLabel(booking)}
-                          </span>
-                          <InkButton
-                            disabled={
-                              booking.payment?.status !== "CAPTURED" ||
-                              !booking.meetingLink
-                            }
-                            onClick={() => {
-                              if (!booking.meetingLink) return;
-                              window.open(
-                                booking.meetingLink,
-                                "_blank",
-                                "noopener,noreferrer",
-                              );
-                            }}
-                          >
-                            Join
-                          </InkButton>
-                          <InkButton
-                            onClick={() => addToCalendar(booking.id)}
-                            disabled={booking.payment?.status !== "CAPTURED"}
-                          >
-                            Add to Calendar
-                          </InkButton>
-                          <InkButton
-                            loading={actionLoading === booking.id}
-                            disabled={
-                              booking.status === "CANCELED" ||
-                              new Date(booking.scheduledStartAt).getTime() -
-                                Date.now() <
-                                24 * 60 * 60 * 1000
-                            }
-                            title={
-                              booking.status === "CANCELED"
-                                ? "Already canceled"
-                                : new Date(booking.scheduledStartAt).getTime() -
-                                    Date.now() <
-                                  24 * 60 * 60 * 1000
-                                ? "Cannot cancel within 24 hours"
-                                : "Cancel this booking"
-                            }
-                            onClick={() => cancelBooking(booking)}
-                          >
-                            Cancel
-                          </InkButton>
-                          <InkButton
-                            disabled={booking.payment?.status !== "CAPTURED"}
-                            onClick={async () => {
-                              const response = await fetch(
-                                `${apiUrl}/bookings/${booking.id}/receipt`,
-                                { credentials: "include" },
-                              );
-                              if (!response.ok) {
-                                pushToast("Receipt not ready", "error");
-                                return;
-                              }
-                              const blob = await response.blob();
-                              const url = window.URL.createObjectURL(blob);
-                              const link = document.createElement("a");
-                              link.href = url;
-                              link.download = `wisdombridge-receipt-${booking.id}.txt`;
-                              document.body.appendChild(link);
-                              link.click();
-                              link.remove();
-                              window.URL.revokeObjectURL(url);
-                              pushToast("Receipt downloaded", "success");
-                            }}
-                          >
-                            Receipt
-                          </InkButton>
-                          <InkButton
-                            onClick={() => {
-                              window.location.href = `/mentors/${booking.mentor.id}`;
-                            }}
-                          >
-                            View Mentor
-                          </InkButton>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-      </div>
+      <section className="space-y-3">
+        <h3 className="newsprint-title text-sm">All Bookings</h3>
+        <DataTable
+          data={bookings}
+          columns={bookingColumns}
+          emptyState={
+            bookingsQuery.isLoading ? "Loading bookings..." : "No bookings yet."
+          }
+        />
+      </section>
 
-      <div className="space-y-4">
+      <section className="space-y-3">
         <h3 className="newsprint-title text-sm">Subscriptions</h3>
-        {subscriptions.length === 0 && (
-          <div className="ink-border p-6 text-sm text-[var(--ink-700)]">
-            No active subscriptions yet.
-          </div>
-        )}
-        {subscriptions.map((sub) => (
-          <div key={sub.id} className="ink-border p-6">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-base font-semibold">
-                  {sub.availabilityRule?.title ?? "Weekly Subscription"}
-                </p>
-                <p className="text-xs text-[var(--ink-700)]">
-                  ₹{sub.priceInr} / week • Status: {sub.status}
-                </p>
-                {sub.nextChargeAt && (
-                  <p className="text-xs text-[var(--ink-700)]">
-                    Next charge: {new Date(sub.nextChargeAt).toLocaleString()}
-                  </p>
-                )}
-                {sub.pauseUntil && (
-                  <p className="text-xs text-[var(--ink-700)]">
-                    Paused until: {new Date(sub.pauseUntil).toLocaleDateString()}
-                  </p>
-                )}
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <label className="flex items-center gap-2 text-xs uppercase tracking-widest text-[var(--ink-700)]">
-                  Pause weeks
-                  <select
-                    className="ink-border px-2 py-1 text-xs"
-                    value={pauseWeeks[sub.id] ?? 1}
-                    onChange={(event) =>
-                      setPauseWeeks((prev) => ({
-                        ...prev,
-                        [sub.id]: Number(event.target.value),
-                      }))
-                    }
-                  >
-                    {[1, 2, 3, 4].map((week) => (
-                      <option key={week} value={week}>
-                        {week}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <InkButton
-                  loading={actionLoading === sub.id}
-                  onClick={() => pauseSubscription(sub.id)}
-                >
-                  Pause
-                </InkButton>
-                <InkButton
-                  loading={actionLoading === sub.id}
-                  onClick={() => resumeSubscription(sub.id)}
-                >
-                  Resume
-                </InkButton>
-                <InkButton
-                  loading={actionLoading === sub.id}
-                  onClick={() => cancelSubscription(sub.id)}
-                >
-                  Cancel
-                </InkButton>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
+        <DataTable
+          data={subscriptions}
+          columns={subscriptionColumns}
+          emptyState={
+            subscriptionsQuery.isLoading
+              ? "Loading subscriptions..."
+              : "No subscriptions yet."
+          }
+        />
+      </section>
     </div>
   );
 }

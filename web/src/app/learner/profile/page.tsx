@@ -1,49 +1,39 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import InkButton from "@/components/InkButton";
 import { useToast } from "@/components/ToastProvider";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { fetchJson } from "@/lib/api";
 
 export default function LearnerProfilePage() {
   const { pushToast } = useToast();
   const [name, setName] = useState("");
   const [goals, setGoals] = useState("");
-  const [saving, setSaving] = useState(false);
+
+  const profileQuery = useQuery({
+    queryKey: ["learners", "me"],
+    queryFn: () =>
+      fetchJson<{
+        learner: { name: string; learnerProfile?: { goals?: string | null } };
+      }>("/learners/me"),
+  });
 
   useEffect(() => {
-    const load = async () => {
-      const response = await fetch(`${apiUrl}/learners/me`, {
-        credentials: "include",
-      });
-      if (response.ok) {
-        const data = (await response.json()) as {
-          learner: { name: string; learnerProfile?: { goals?: string | null } };
-        };
-        setName(data.learner.name);
-        setGoals(data.learner.learnerProfile?.goals ?? "");
-      }
-    };
-    load();
-  }, []);
+    if (!profileQuery.data) return;
+    setName(profileQuery.data.learner.name);
+    setGoals(profileQuery.data.learner.learnerProfile?.goals ?? "");
+  }, [profileQuery.data]);
 
-  const save = async () => {
-    setSaving(true);
-    const response = await fetch(`${apiUrl}/learners/me`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ name, goals }),
-    });
-    if (!response.ok) {
-      pushToast("Failed to save profile", "error");
-    } else {
-      pushToast("Profile updated", "success");
-    }
-    setSaving(false);
-  };
+  const save = useMutation({
+    mutationFn: () =>
+      fetchJson("/learners/me", {
+        method: "PATCH",
+        json: { name, goals },
+      }),
+    onSuccess: () => pushToast("Profile updated", "success"),
+    onError: () => pushToast("Failed to save profile", "error"),
+  });
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
@@ -71,7 +61,7 @@ export default function LearnerProfilePage() {
             onChange={(event) => setGoals(event.target.value)}
           />
         </label>
-        <InkButton loading={saving} onClick={save}>
+        <InkButton loading={save.isPending} onClick={() => save.mutate()}>
           Save Profile
         </InkButton>
       </section>

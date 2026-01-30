@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { useQuery } from "@tanstack/react-query";
+import { fetchJson } from "@/lib/api";
 
 type Role = "MENTOR" | "LEARNER" | "ADMIN";
 
@@ -18,24 +17,26 @@ export default function RoleGate({
   const [ready, setReady] = useState(false);
   const router = useRouter();
 
+  const authQuery = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () => fetchJson<{ user: { role: Role } }>("/auth/me"),
+    retry: false,
+  });
+
   useEffect(() => {
-    const check = async () => {
-      const response = await fetch(`${apiUrl}/auth/me`, {
-        credentials: "include",
-      });
-      if (!response.ok) {
-        router.replace("/auth/sign-in");
-        return;
-      }
-      const data = (await response.json()) as { user: { role: Role } };
-      if (!allowed.includes(data.user.role)) {
-        router.replace("/");
-        return;
-      }
+    if (authQuery.isLoading) return;
+    if (authQuery.isError) {
+      router.replace("/auth/sign-in");
+      return;
+    }
+    if (authQuery.data && !allowed.includes(authQuery.data.user.role)) {
+      router.replace("/");
+      return;
+    }
+    if (authQuery.data) {
       setReady(true);
-    };
-    check();
-  }, [allowed, router]);
+    }
+  }, [authQuery.data, authQuery.isError, authQuery.isLoading, allowed, router]);
 
   if (!ready) {
     return (

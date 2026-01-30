@@ -17,7 +17,6 @@ import {
   verifyCheckoutSignature,
 } from "../lib/razorpay";
 import { syncCalendarForBooking } from "../lib/calendar";
-import { captureAuthorizedPayment } from "../services/payments";
 
 export const bookingRouter = Router();
 
@@ -85,17 +84,13 @@ bookingRouter.post(
           amount: slot.priceInr * 100,
           currency: "INR",
           receipt: `booking_${booking.id}`,
-          payment_capture: false,
+          payment_capture: true,
           notes: {
             bookingId: booking.id,
             mentorId: slot.mentorId,
             learnerId: req.user!.id,
           },
         });
-
-        const scheduledFor = new Date(
-          booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000,
-        );
 
         const payment = await tx.payment.create({
           data: {
@@ -104,7 +99,7 @@ bookingRouter.post(
             amountInr: slot.priceInr,
             status: PaymentStatus.CREATED,
             providerOrderId: order.id,
-            scheduledFor,
+            scheduledFor: new Date(Date.now() + 30 * 60 * 1000),
           raw: order as unknown as Prisma.JsonObject,
           },
         });
@@ -235,7 +230,7 @@ bookingRouter.post(
     const bookingId = String(req.params.id);
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
-      include: { payment: true },
+      include: { payment: true, availabilitySlot: true },
     });
 
     if (!booking) {
@@ -260,25 +255,33 @@ bookingRouter.post(
       throw new HttpError(400, "invalid_signature");
     }
 
-    const scheduledFor =
-      booking.payment.scheduledFor ??
-      new Date(booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000);
+    const payment = await prisma.$transaction(
+      async (tx: Prisma.TransactionClient) => {
+        const updatedPayment = await tx.payment.update({
+          where: { id: booking.payment!.id },
+          data: {
+            status: PaymentStatus.CAPTURED,
+            providerPaymentId: input.razorpayPaymentId,
+            method: input.method,
+            capturedAt: new Date(),
+          },
+        });
 
-    const payment = await prisma.payment.update({
-      where: { id: booking.payment.id },
-      data: {
-        status: PaymentStatus.AUTHORIZED,
-        providerPaymentId: input.razorpayPaymentId,
-        method: input.method,
-        scheduledFor,
+        await tx.booking.update({
+          where: { id: booking.id },
+          data: { status: BookingStatus.CONFIRMED },
+        });
+
+        await tx.availabilitySlot.update({
+          where: { id: booking.availabilitySlotId },
+          data: { status: AvailabilityStatus.BOOKED },
+        });
+
+        return updatedPayment;
       },
-    });
+    );
 
     await syncCalendarForBooking(booking.id);
-
-    if (scheduledFor.getTime() <= Date.now()) {
-      await captureAuthorizedPayment(payment.id);
-    }
 
     return res.json({ payment });
   }),
@@ -306,6 +309,12 @@ bookingRouter.post(
     }
     if (booking.status === BookingStatus.CANCELED) {
       throw new HttpError(409, "already_canceled");
+    }
+    if (
+      booking.availabilitySlot?.mode === "ONE_TIME" &&
+      booking.payment?.status === PaymentStatus.CAPTURED
+    ) {
+      throw new HttpError(409, "cancel_not_allowed");
     }
 
     const cutoff = new Date(
@@ -474,8 +483,11 @@ bookingRouter.post(
       throw new HttpError(403, "forbidden");
     }
 
-    await syncCalendarForBooking(bookingId);
+    const result = await syncCalendarForBooking(bookingId);
+    if (!result.mentorAdded && !result.learnerAdded) {
+      throw new HttpError(409, "calendar_not_linked");
+    }
 
-    return res.json({ synced: true });
+    return res.json({ synced: true, ...result });
   }),
 );

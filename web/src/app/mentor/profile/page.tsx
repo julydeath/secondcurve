@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import InkButton from "@/components/InkButton";
 import Image from "next/image";
 import TagInput from "@/components/TagInput";
 import { useToast } from "@/components/ToastProvider";
-
-const apiUrl =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { apiUrl, fetchJson } from "@/lib/api";
 
 type Profile = {
   name: string;
@@ -43,107 +42,107 @@ export default function MentorProfile() {
   const [links, setLinks] = useState({
     linkedinLinked: false,
   });
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const load = async () => {
-      const [meRes, linksRes] = await Promise.all([
-        fetch(`${apiUrl}/auth/me`, { credentials: "include" }),
-        fetch(`${apiUrl}/auth/links`, { credentials: "include" }),
-      ]);
-      if (meRes.ok) {
-        const data = (await meRes.json()) as {
-          user: {
-            name: string;
-            mentorProfile?: {
-              headline?: string | null;
-              linkedinHeadline?: string | null;
-              linkedinUrl?: string | null;
-              linkedinLocation?: string | null;
-              linkedinIndustry?: string | null;
-              currentCompany?: string | null;
-              currentTitle?: string | null;
-              bio?: string | null;
-              yearsExperience?: number | null;
-              expertiseTags?: string[];
-              subjectTags?: string[];
-              collectionTags?: string[];
-              languages?: string[];
-              profilePhotoUrl?: string | null;
-            } | null;
-          };
+  const profileQuery = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () =>
+      fetchJson<{
+        user: {
+          name: string;
+          mentorProfile?: {
+            headline?: string | null;
+            linkedinHeadline?: string | null;
+            linkedinUrl?: string | null;
+            linkedinLocation?: string | null;
+            linkedinIndustry?: string | null;
+            currentCompany?: string | null;
+            currentTitle?: string | null;
+            bio?: string | null;
+            yearsExperience?: number | null;
+            expertiseTags?: string[];
+            subjectTags?: string[];
+            collectionTags?: string[];
+            languages?: string[];
+            profilePhotoUrl?: string | null;
+          } | null;
         };
-        setProfile({
-          name: data.user.name,
-          headline: data.user.mentorProfile?.headline ?? "",
-          linkedinHeadline: data.user.mentorProfile?.linkedinHeadline ?? "",
-          linkedinUrl: data.user.mentorProfile?.linkedinUrl ?? "",
-          linkedinLocation: data.user.mentorProfile?.linkedinLocation ?? "",
-          linkedinIndustry: data.user.mentorProfile?.linkedinIndustry ?? "",
-          currentCompany: data.user.mentorProfile?.currentCompany ?? "",
-          currentTitle: data.user.mentorProfile?.currentTitle ?? "",
-          bio: data.user.mentorProfile?.bio ?? "",
-          yearsExperience: data.user.mentorProfile?.yearsExperience ?? 0,
-          expertiseTags: data.user.mentorProfile?.expertiseTags ?? [],
-          subjectTags: data.user.mentorProfile?.subjectTags ?? [],
-          collectionTags: data.user.mentorProfile?.collectionTags ?? [],
-          languages: data.user.mentorProfile?.languages ?? [],
-          profilePhotoUrl: data.user.mentorProfile?.profilePhotoUrl ?? "",
-        });
-      }
-      if (linksRes.ok) {
-        const data = (await linksRes.json()) as {
-          linkedinLinked: boolean;
-        };
-        setLinks({ linkedinLinked: data.linkedinLinked });
-      }
-    };
-    load();
-  }, []);
+      }>("/auth/me"),
+  });
 
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    const payload: Record<string, unknown> = {};
-    if (profile.bio && profile.bio.trim().length > 0) {
-      payload.bio = profile.bio;
-    }
-    if (profile.yearsExperience && profile.yearsExperience > 0) {
-      payload.yearsExperience = profile.yearsExperience;
-    }
-    if (profile.expertiseTags && profile.expertiseTags.length > 0) {
-      payload.expertiseTags = profile.expertiseTags;
-    }
-    if (profile.subjectTags && profile.subjectTags.length > 0) {
-      payload.subjectTags = profile.subjectTags;
-    }
-    if (profile.collectionTags && profile.collectionTags.length > 0) {
-      payload.collectionTags = profile.collectionTags;
-    }
-    if (profile.languages && profile.languages.length > 0) {
-      payload.languages = profile.languages;
-    }
-    if (profile.headline && profile.headline.trim().length > 0) {
-      payload.headline = profile.headline;
-    }
-    const response = await fetch(`${apiUrl}/mentors/me`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify(payload),
+  const linksQuery = useQuery({
+    queryKey: ["auth", "links"],
+    queryFn: () =>
+      fetchJson<{
+        linkedinLinked: boolean;
+        googleLinked: boolean;
+        googleCalendarLinked?: boolean;
+      }>("/auth/links"),
+  });
+
+  useEffect(() => {
+    if (!profileQuery.data) return;
+    const data = profileQuery.data.user;
+    setProfile({
+      name: data.name,
+      headline: data.mentorProfile?.headline ?? "",
+      linkedinHeadline: data.mentorProfile?.linkedinHeadline ?? "",
+      linkedinUrl: data.mentorProfile?.linkedinUrl ?? "",
+      linkedinLocation: data.mentorProfile?.linkedinLocation ?? "",
+      linkedinIndustry: data.mentorProfile?.linkedinIndustry ?? "",
+      currentCompany: data.mentorProfile?.currentCompany ?? "",
+      currentTitle: data.mentorProfile?.currentTitle ?? "",
+      bio: data.mentorProfile?.bio ?? "",
+      yearsExperience: data.mentorProfile?.yearsExperience ?? 0,
+      expertiseTags: data.mentorProfile?.expertiseTags ?? [],
+      subjectTags: data.mentorProfile?.subjectTags ?? [],
+      collectionTags: data.mentorProfile?.collectionTags ?? [],
+      languages: data.mentorProfile?.languages ?? [],
+      profilePhotoUrl: data.mentorProfile?.profilePhotoUrl ?? "",
     });
-    if (!response.ok) {
-      const data = (await response.json().catch(() => ({}))) as {
-        error?: string;
-      };
-      setError(data.error ?? "Failed to save profile.");
-      pushToast(data.error ?? "Failed to save profile", "error");
-    } else {
-      pushToast("Profile updated", "success");
-    }
-    setSaving(false);
-  };
+  }, [profileQuery.data]);
+
+  useEffect(() => {
+    if (!linksQuery.data) return;
+    setLinks({ linkedinLinked: linksQuery.data.linkedinLinked });
+  }, [linksQuery.data]);
+
+  const save = useMutation({
+    mutationFn: () => {
+      setError(null);
+      const payload: Record<string, unknown> = {};
+      if (profile.bio && profile.bio.trim().length > 0) {
+        payload.bio = profile.bio;
+      }
+      if (profile.yearsExperience && profile.yearsExperience > 0) {
+        payload.yearsExperience = profile.yearsExperience;
+      }
+      if (profile.expertiseTags && profile.expertiseTags.length > 0) {
+        payload.expertiseTags = profile.expertiseTags;
+      }
+      if (profile.subjectTags && profile.subjectTags.length > 0) {
+        payload.subjectTags = profile.subjectTags;
+      }
+      if (profile.collectionTags && profile.collectionTags.length > 0) {
+        payload.collectionTags = profile.collectionTags;
+      }
+      if (profile.languages && profile.languages.length > 0) {
+        payload.languages = profile.languages;
+      }
+      if (profile.headline && profile.headline.trim().length > 0) {
+        payload.headline = profile.headline;
+      }
+      return fetchJson("/mentors/me", {
+        method: "PATCH",
+        json: payload,
+      });
+    },
+    onSuccess: () => pushToast("Profile updated", "success"),
+    onError: (err: Error) => {
+      setError(err.message ?? "Failed to save profile.");
+      pushToast(err.message ?? "Failed to save profile", "error");
+    },
+  });
 
   return (
     <div className="space-y-6">
@@ -166,19 +165,22 @@ export default function MentorProfile() {
           <div className="border-2 border-black p-3">
             <p className="newsprint-title text-xs">Headline</p>
             <p className="mt-2 text-sm text-[var(--ink-700)]">
-              {profile.linkedinHeadline || "Not available with current LinkedIn permissions."}
+              {profile.linkedinHeadline ||
+                "Not available with current LinkedIn permissions."}
             </p>
           </div>
           <div className="border-2 border-black p-3">
             <p className="newsprint-title text-xs">Current Role</p>
             <p className="mt-2 text-sm text-[var(--ink-700)]">
-              {profile.currentTitle || "Not available with current LinkedIn permissions."}
+              {profile.currentTitle ||
+                "Not available with current LinkedIn permissions."}
             </p>
           </div>
           <div className="border-2 border-black p-3">
             <p className="newsprint-title text-xs">Company</p>
             <p className="mt-2 text-sm text-[var(--ink-700)]">
-              {profile.currentCompany || "Not available with current LinkedIn permissions."}
+              {profile.currentCompany ||
+                "Not available with current LinkedIn permissions."}
             </p>
           </div>
           <div className="border-2 border-black p-3">
@@ -186,7 +188,8 @@ export default function MentorProfile() {
             <p className="mt-2 text-sm text-[var(--ink-700)]">
               {[profile.linkedinLocation, profile.linkedinIndustry]
                 .filter(Boolean)
-                .join(" • ") || "Not available with current LinkedIn permissions."}
+                .join(" • ") ||
+                "Not available with current LinkedIn permissions."}
             </p>
           </div>
         </div>
@@ -306,7 +309,7 @@ export default function MentorProfile() {
             />
           </div>
         )}
-        <InkButton className="mt-6" onClick={save} loading={saving}>
+        <InkButton className="mt-6" onClick={() => save.mutate()} loading={save.isPending}>
           Save Profile
         </InkButton>
         {error && (
