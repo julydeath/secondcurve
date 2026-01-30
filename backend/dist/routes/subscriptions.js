@@ -22,6 +22,22 @@ exports.subscriptionRouter.post("/", auth_1.requireAuth, (0, auth_1.requireRole)
     if (!rule || rule.mode !== client_1.AvailabilityMode.RECURRING || !rule.active) {
         throw new http_1.HttpError(404, "rule_not_found");
     }
+    const existingSubscription = await prisma_1.prisma.subscription.findFirst({
+        where: {
+            availabilityRuleId: rule.id,
+            status: {
+                in: [
+                    client_1.SubscriptionStatus.CREATED,
+                    client_1.SubscriptionStatus.ACTIVE,
+                    client_1.SubscriptionStatus.PAUSED,
+                    client_1.SubscriptionStatus.PAST_DUE,
+                ],
+            },
+        },
+    });
+    if (existingSubscription) {
+        throw new http_1.HttpError(409, "rule_unavailable");
+    }
     const slot = await (0, subscriptions_1.findOrCreateNextSlot)(rule, new Date());
     if (slot.status !== client_1.AvailabilityStatus.AVAILABLE) {
         throw new http_1.HttpError(409, "slot_unavailable");

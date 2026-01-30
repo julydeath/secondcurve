@@ -26,6 +26,7 @@ const createApp = () => {
         ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
         : undefined;
     app.use((0, helmet_1.default)());
+    app.set("trust proxy", 1);
     app.use((0, cors_1.default)({ origin: corsOrigins ?? true, credentials: true }));
     app.use((0, cookie_parser_1.default)());
     app.use("/webhooks/razorpay", express_1.default.raw({ type: "application/json" }));

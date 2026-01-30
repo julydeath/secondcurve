@@ -299,7 +299,7 @@ bookingRouter.post(
     const bookingId = String(req.params.id);
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
-      include: { payment: true },
+      include: { payment: true, availabilitySlot: true },
     });
     if (!booking) {
       throw new HttpError(404, "booking_not_found");

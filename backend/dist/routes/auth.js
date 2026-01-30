@@ -13,6 +13,21 @@ const http_1 = require("../lib/http");
 const auth_1 = require("../lib/auth");
 exports.authRouter = (0, express_1.Router)();
 const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+const cookieDomain = process.env.COOKIE_DOMAIN || undefined;
+const cookieSameSite = process.env.COOKIE_SAMESITE ??
+    "lax";
+const cookieSecure = process.env.COOKIE_SECURE === "true" ||
+    process.env.NODE_ENV === "production";
+const setSessionCookie = (res, token) => {
+    res.cookie("wb_session", token, {
+        httpOnly: true,
+        sameSite: cookieSameSite,
+        secure: cookieSecure,
+        path: "/",
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        domain: cookieDomain,
+    });
+};
 const oauthStateSecret = process.env.OAUTH_STATE_SECRET ?? "dev-secret";
 const linkedInScopes = process.env.LINKEDIN_SCOPES ?? "openid profile email";
 const base64UrlEncode = (value) => Buffer.from(value)
@@ -223,13 +238,7 @@ exports.authRouter.post("/google", (0, http_1.asyncHandler)(async (req, res) => 
         email: user.email,
         name: user.name,
     });
-    res.cookie("wb_session", token, {
-        httpOnly: true,
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
-        path: "/",
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
     return res.status(201).json({
         user,
         authToken: token,
@@ -402,13 +411,7 @@ exports.authRouter.get("/google/callback", (0, http_1.asyncHandler)(async (req, 
         email: user.email,
         name: user.name,
     });
-    res.cookie("wb_session", token, {
-        httpOnly: true,
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
-        path: "/",
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
     return res.redirect(`${appBaseUrl}/auth/success`);
 }));
 exports.authRouter.get("/linkedin/start", (0, http_1.asyncHandler)(async (req, res) => {
@@ -538,13 +541,7 @@ exports.authRouter.get("/linkedin/callback", (0, http_1.asyncHandler)(async (req
         email: user.email,
         name: user.name,
     });
-    res.cookie("wb_session", token, {
-        httpOnly: true,
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
-        path: "/",
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setSessionCookie(res, token);
     return res.redirect(`${appBaseUrl}/auth/success`);
 }));
 exports.authRouter.get("/me", auth_1.requireAuth, (0, http_1.asyncHandler)(async (req, res) => {
@@ -560,20 +557,24 @@ exports.authRouter.get("/me", auth_1.requireAuth, (0, http_1.asyncHandler)(async
 exports.authRouter.get("/links", auth_1.requireAuth, (0, http_1.asyncHandler)(async (req, res) => {
     const accounts = await prisma_1.prisma.oAuthAccount.findMany({
         where: { userId: req.user.id },
-        select: { provider: true },
+        select: { provider: true, scopes: true },
     });
     const providers = new Set(accounts.map((account) => account.provider));
+    const googleAccount = accounts.find((account) => account.provider === client_1.OAuthProvider.GOOGLE);
+    const googleCalendarLinked = Boolean(googleAccount?.scopes?.includes("https://www.googleapis.com/auth/calendar.events"));
     return res.json({
         googleLinked: providers.has(client_1.OAuthProvider.GOOGLE),
         linkedinLinked: providers.has(client_1.OAuthProvider.LINKEDIN),
+        googleCalendarLinked,
     });
 }));
 exports.authRouter.post("/logout", (0, http_1.asyncHandler)(async (_req, res) => {
     res.clearCookie("wb_session", {
         httpOnly: true,
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        sameSite: cookieSameSite,
+        secure: cookieSecure,
         path: "/",
+        domain: cookieDomain,
     });
     return res.json({ ok: true });
 }));

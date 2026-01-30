@@ -5,7 +5,7 @@ const client_1 = require("@prisma/client");
 const prisma_1 = require("./prisma");
 const http_1 = require("./http");
 const createCalendarEvent = async (params) => {
-    await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+    const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
         method: "POST",
         headers: {
             Authorization: `Bearer ${params.accessToken}`,
@@ -18,6 +18,16 @@ const createCalendarEvent = async (params) => {
             end: { dateTime: params.end, timeZone: params.timezone },
         }),
     });
+    if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new http_1.HttpError(502, "google_calendar_event_failed", { body: text });
+    }
+    return response;
+};
+const hasCalendarScope = (scopes) => {
+    if (!scopes)
+        return false;
+    return scopes.split(" ").some((scope) => scope.includes("https://www.googleapis.com/auth/calendar.events"));
 };
 const refreshGoogleToken = async (refreshToken) => {
     const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -40,7 +50,7 @@ const refreshGoogleToken = async (refreshToken) => {
     }
     return (await response.json());
 };
-const getGoogleAccessTokenForUser = async (userId) => {
+const getGoogleAccessTokenForUser = async (userId, options) => {
     const account = await prisma_1.prisma.oAuthAccount.findFirst({
         where: {
             userId,
@@ -50,11 +60,17 @@ const getGoogleAccessTokenForUser = async (userId) => {
     if (!account || !account.accessToken) {
         return null;
     }
+    if (options?.requireCalendarScope && !hasCalendarScope(account.scopes)) {
+        return null;
+    }
     const needsRefresh = account.expiresAt &&
         account.refreshToken &&
         account.expiresAt.getTime() < Date.now() + 60_000;
     if (!needsRefresh) {
         return account.accessToken;
+    }
+    if (!account.refreshToken) {
+        return null;
     }
     const refreshed = await refreshGoogleToken(account.refreshToken);
     await prisma_1.prisma.oAuthAccount.update({
@@ -78,11 +94,15 @@ const syncCalendarForBooking = async (bookingId) => {
         },
     });
     if (!booking) {
-        return;
+        return { mentorAdded: false, learnerAdded: false };
     }
     const [mentorToken, learnerToken] = await Promise.all([
-        getGoogleAccessTokenForUser(booking.mentorId),
-        getGoogleAccessTokenForUser(booking.learnerId),
+        getGoogleAccessTokenForUser(booking.mentorId, {
+            requireCalendarScope: true,
+        }),
+        getGoogleAccessTokenForUser(booking.learnerId, {
+            requireCalendarScope: true,
+        }),
     ]);
     const timezone = "Asia/Kolkata";
     const summary = `WisdomBridge • ${booking.mentor.name} ↔ ${booking.learner.name}`;
@@ -90,6 +110,8 @@ const syncCalendarForBooking = async (bookingId) => {
     const start = booking.scheduledStartAt.toISOString();
     const end = booking.scheduledEndAt.toISOString();
     const tasks = [];
+    let mentorAdded = false;
+    let learnerAdded = false;
     if (mentorToken) {
         tasks.push(createCalendarEvent({
             accessToken: mentorToken,
@@ -98,6 +120,8 @@ const syncCalendarForBooking = async (bookingId) => {
             start,
             end,
             timezone,
+        }).then(() => {
+            mentorAdded = true;
         }));
     }
     if (learnerToken) {
@@ -108,8 +132,11 @@ const syncCalendarForBooking = async (bookingId) => {
             start,
             end,
             timezone,
+        }).then(() => {
+            learnerAdded = true;
         }));
     }
     await Promise.allSettled(tasks);
+    return { mentorAdded, learnerAdded };
 };
 exports.syncCalendarForBooking = syncCalendarForBooking;

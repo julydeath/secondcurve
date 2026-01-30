@@ -10,12 +10,15 @@ const app = (0, app_1.createApp)();
 app.listen(port, () => {
     console.log(`API listening on http://localhost:${port}`);
 });
+const enableAutoRolling = process.env.AUTO_ROLLING === "true";
 const startSchedulers = () => {
     const run = async () => {
         await (0, payments_1.captureDuePayments)();
         await (0, payments_1.cancelOverdueUnpaidBookings)();
         await (0, subscriptions_1.resumeDueSubscriptions)();
-        await (0, availability_1.ensureRollingSlots)(8);
+        if (enableAutoRolling) {
+            await (0, availability_1.ensureRollingSlots)(8);
+        }
     };
     void run();
     setInterval(() => {

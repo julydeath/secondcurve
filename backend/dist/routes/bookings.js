@@ -9,7 +9,6 @@ const http_1 = require("../lib/http");
 const auth_1 = require("../lib/auth");
 const razorpay_1 = require("../lib/razorpay");
 const calendar_1 = require("../lib/calendar");
-const payments_1 = require("../services/payments");
 exports.bookingRouter = (0, express_1.Router)();
 const bookingCreateSchema = zod_1.z.object({
     availabilitySlotId: zod_1.z.string().min(1),
@@ -62,14 +61,13 @@ exports.bookingRouter.post("/", auth_1.requireAuth, (0, auth_1.requireRole)(clie
             amount: slot.priceInr * 100,
             currency: "INR",
             receipt: `booking_${booking.id}`,
-            payment_capture: false,
+            payment_capture: true,
             notes: {
                 bookingId: booking.id,
                 mentorId: slot.mentorId,
                 learnerId: req.user.id,
             },
         });
-        const scheduledFor = new Date(booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000);
         const payment = await tx.payment.create({
             data: {
                 bookingId: booking.id,
@@ -77,7 +75,7 @@ exports.bookingRouter.post("/", auth_1.requireAuth, (0, auth_1.requireRole)(clie
                 amountInr: slot.priceInr,
                 status: client_1.PaymentStatus.CREATED,
                 providerOrderId: order.id,
-                scheduledFor,
+                scheduledFor: new Date(Date.now() + 30 * 60 * 1000),
                 raw: order,
             },
         });
@@ -177,7 +175,7 @@ exports.bookingRouter.post("/:id/confirm-payment", auth_1.requireAuth, (0, auth_
     const bookingId = String(req.params.id);
     const booking = await prisma_1.prisma.booking.findUnique({
         where: { id: bookingId },
-        include: { payment: true },
+        include: { payment: true, availabilitySlot: true },
     });
     if (!booking) {
         throw new http_1.HttpError(404, "booking_not_found");
@@ -195,21 +193,27 @@ exports.bookingRouter.post("/:id/confirm-payment", auth_1.requireAuth, (0, auth_
     if (!valid) {
         throw new http_1.HttpError(400, "invalid_signature");
     }
-    const scheduledFor = booking.payment.scheduledFor ??
-        new Date(booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000);
-    const payment = await prisma_1.prisma.payment.update({
-        where: { id: booking.payment.id },
-        data: {
-            status: client_1.PaymentStatus.AUTHORIZED,
-            providerPaymentId: input.razorpayPaymentId,
-            method: input.method,
-            scheduledFor,
-        },
+    const payment = await prisma_1.prisma.$transaction(async (tx) => {
+        const updatedPayment = await tx.payment.update({
+            where: { id: booking.payment.id },
+            data: {
+                status: client_1.PaymentStatus.CAPTURED,
+                providerPaymentId: input.razorpayPaymentId,
+                method: input.method,
+                capturedAt: new Date(),
+            },
+        });
+        await tx.booking.update({
+            where: { id: booking.id },
+            data: { status: client_1.BookingStatus.CONFIRMED },
+        });
+        await tx.availabilitySlot.update({
+            where: { id: booking.availabilitySlotId },
+            data: { status: client_1.AvailabilityStatus.BOOKED },
+        });
+        return updatedPayment;
     });
     await (0, calendar_1.syncCalendarForBooking)(booking.id);
-    if (scheduledFor.getTime() <= Date.now()) {
-        await (0, payments_1.captureAuthorizedPayment)(payment.id);
-    }
     return res.json({ payment });
 }));
 const cancelSchema = zod_1.z.object({
@@ -220,7 +224,7 @@ exports.bookingRouter.post("/:id/cancel", auth_1.requireAuth, (0, http_1.asyncHa
     const bookingId = String(req.params.id);
     const booking = await prisma_1.prisma.booking.findUnique({
         where: { id: bookingId },
-        include: { payment: true },
+        include: { payment: true, availabilitySlot: true },
     });
     if (!booking) {
         throw new http_1.HttpError(404, "booking_not_found");
@@ -230,6 +234,10 @@ exports.bookingRouter.post("/:id/cancel", auth_1.requireAuth, (0, http_1.asyncHa
     }
     if (booking.status === client_1.BookingStatus.CANCELED) {
         throw new http_1.HttpError(409, "already_canceled");
+    }
+    if (booking.availabilitySlot?.mode === "ONE_TIME" &&
+        booking.payment?.status === client_1.PaymentStatus.CAPTURED) {
+        throw new http_1.HttpError(409, "cancel_not_allowed");
     }
     const cutoff = new Date(booking.scheduledStartAt.getTime() - 24 * 60 * 60 * 1000);
     if (Date.now() >= cutoff.getTime()) {
@@ -356,6 +364,9 @@ exports.bookingRouter.post("/:id/sync-calendar", auth_1.requireAuth, (0, http_1.
     if (![booking.mentorId, booking.learnerId].includes(req.user.id)) {
         throw new http_1.HttpError(403, "forbidden");
     }
-    await (0, calendar_1.syncCalendarForBooking)(bookingId);
-    return res.json({ synced: true });
+    const result = await (0, calendar_1.syncCalendarForBooking)(bookingId);
+    if (!result.mentorAdded && !result.learnerAdded) {
+        throw new http_1.HttpError(409, "calendar_not_linked");
+    }
+    return res.json({ synced: true, ...result });
 }));
